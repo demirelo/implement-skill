@@ -1,0 +1,11 @@
+{
+  "name": "implement-skill",
+  "owner": { "name": "demirelo" },
+  "plugins": [
+    {
+      "name": "implement",
+      "source": "./",
+      "description": "Autonomous human-in-the-loop SWE loop — builds a feature end-to-end into a reviewable GitHub draft PR against an objective test oracle, sandboxed, with a self-improving local model router."
+    }
+  ]
+}

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>/implement — system overview</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3/dist/tabler-icons.min.css">
+<style>
+:root{
+  --page:#f5f4ef;
+  --surface:#ffffff;
+  --text-primary:#1a1a18;
+  --text-secondary:#54534d;
+  --text-tertiary:#86857c;
+  --border-tertiary:rgba(0,0,0,.10);
+  --border-secondary:rgba(0,0,0,.18);
+  --radius-md:8px;
+  --radius-lg:12px;
+  --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --acc-purple:#534AB7;
+  --acc-teal:#0F6E56;
+  --acc-amber:#A85D11;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --page:#1c1b19;
+    --surface:#262522;
+    --text-primary:#f1efe9;
+    --text-secondary:#bbb9b0;
+    --text-tertiary:#8a887f;
+    --border-tertiary:rgba(255,255,255,.12);
+    --border-secondary:rgba(255,255,255,.22);
+    --acc-purple:#AFA9EC;
+    --acc-teal:#5DCAA5;
+    --acc-amber:#FAC775;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--text-primary);font-family:var(--font-sans);line-height:1.55;-webkit-font-smoothing:antialiased}
+.page{max-width:880px;margin:0 auto;padding:2.5rem 1.5rem 4rem}
+h1{font-size:26px;font-weight:500;margin:0}
+h2{font-size:19px;font-weight:500;margin:0 0 .85rem}
+h3{font-size:16px;font-weight:500;margin:0;color:var(--text-primary)}
+section{margin-top:1.9rem}
+.card{background:var(--surface);border:1px solid var(--border-tertiary);border-radius:var(--radius-lg);padding:1.1rem 1.25rem}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:.8rem}
+.muted{color:var(--text-secondary);font-size:15px;line-height:1.55}
+.lbl{font-size:12.5px;color:var(--text-tertiary)}
+.pill{display:inline-flex;align-items:center;gap:.4rem;padding:.22rem .6rem;border:1px solid var(--border-secondary);border-radius:999px;font-size:13px;color:var(--text-secondary);white-space:nowrap}
+.row-pills{display:flex;gap:.5rem;flex-wrap:wrap}
+.ph{display:flex;align-items:flex-start;gap:.8rem;padding:.7rem 0;border-top:1px solid var(--border-tertiary)}
+.num{flex:none;width:28px;height:28px;border-radius:999px;border:1.5px solid;display:flex;align-items:center;justify-content:center;font-size:13.5px}
+.pname{font-weight:500;font-size:15px;color:var(--text-primary)}
+.feat{background:var(--surface);border:1px solid var(--border-tertiary);border-radius:var(--radius-md);padding:.8rem .9rem}
+.mono{font-family:var(--font-mono);font-size:13.5px}
+footer{margin-top:2.6rem;padding-top:1.2rem;border-top:1px solid var(--border-tertiary);color:var(--text-tertiary);font-size:13px;line-height:1.7}
+a{color:var(--acc-purple);text-decoration:none}
+a:hover{text-decoration:underline}
+@media (max-width:680px){.g2,.g4{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <div style="display:flex;align-items:center;gap:.5rem">
+      <i class="ti ti-infinity" style="font-size:24px;color:var(--acc-purple)" aria-hidden="true"></i>
+      <h1><span class="mono" style="font-size:24px">/implement</span></h1>
+    </div>
+    <p class="muted" style="margin:.5rem 0 0;max-width:46rem">Two model teams turn a goal into a reviewed pull request. You confirm the intent and merge the result — the loop does everything in between.</p>
+    <div class="row-pills" style="margin-top:.9rem">
+      <span class="pill"><i class="ti ti-users" aria-hidden="true"></i>Architects + Builders</span>
+      <span class="pill"><i class="ti ti-hand-stop" aria-hidden="true"></i>2 human touchpoints</span>
+      <span class="pill"><i class="ti ti-git-pull-request" aria-hidden="true"></i>ships a pull request</span>
+      <span class="pill"><i class="ti ti-test-pipe" aria-hidden="true"></i>tests are the oracle</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>The two teams</h2>
+    <div class="g2">
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:.45rem">
+          <i class="ti ti-compass" style="font-size:18px;color:var(--acc-purple)" aria-hidden="true"></i>
+          <h3>Architects</h3>
+          <span class="lbl" style="margin-left:auto">judgment</span>
+        </div>
+        <p class="muted" style="margin:.5rem 0 0">Pin intent, plan by consensus, author the acceptance tests, review. Never write production code.</p>
+        <div class="lbl" style="margin-top:.65rem">Claude · GPT-5.5 xhigh · GLM</div>
+      </div>
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:.45rem">
+          <i class="ti ti-hammer" style="font-size:18px;color:var(--acc-teal)" aria-hidden="true"></i>
+          <h3>Builders</h3>
+          <span class="lbl" style="margin-left:auto">execution</span>
+        </div>
+        <p class="muted" style="margin:.5rem 0 0">Write and rewrite code until the Architects' tests pass. Best-of-N — the smallest green diff wins.</p>
+        <div class="lbl" style="margin-top:.65rem">DeepSeek · MiniMax · Kimi</div>
+      </div>
+    </div>
+    <div class="lbl" style="margin-top:.7rem"><i class="ti ti-info-circle" aria-hidden="true"></i> Roles, not licenses — a Builder can be a closed model; an Architect can be GPT.</div>
+  </section>
+
+  <section>
+    <h2>Setup — once</h2>
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:.45rem">
+        <i class="ti ti-settings" style="font-size:18px;color:var(--text-secondary)" aria-hidden="true"></i>
+        <h3>Configure your credentials and panels</h3>
+        <span class="pill" style="margin-left:auto"><i class="ti ti-terminal-2" aria-hidden="true"></i><span class="mono">/implement setup</span></span>
+      </div>
+      <p class="muted" style="margin:.5rem 0 0">Provide each provider key your way — 1Password service account, desktop, env var, .env, or macOS keychain — then compose your model pool into the two panels. Stored once; never re-asked.</p>
+      <div class="row-pills" style="margin-top:.7rem">
+        <span class="pill"><i class="ti ti-lock" style="color:var(--acc-teal)" aria-hidden="true"></i>secrets stay in your vault</span>
+        <span class="pill"><i class="ti ti-shield-lock" style="color:var(--acc-purple)" aria-hidden="true"></i>Venice = privacy lane (e2ee)</span>
+        <span class="pill"><i class="ti ti-cloud-off" aria-hidden="true"></i>Claude-only floor needs zero keys</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The loop — and where you come in</h2>
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:.45rem;margin-bottom:.2rem">
+        <i class="ti ti-refresh" style="font-size:18px;color:var(--acc-purple)" aria-hidden="true"></i>
+        <h3>One goal, six phases</h3>
+        <span class="pill" style="margin-left:auto"><i class="ti ti-terminal-2" aria-hidden="true"></i><span class="mono">/implement "&lt;goal&gt;"</span></span>
+      </div>
+
+      <div class="ph">
+        <div class="num" style="border-color:var(--acc-amber);color:var(--acc-amber)">0</div>
+        <div style="flex:1"><div class="pname">Intent</div><div class="muted" style="font-size:14px">Architects interrogate you one crux at a time, then reflect back acceptance criteria.</div></div>
+        <span class="pill" style="flex:none;border-color:var(--acc-amber);color:var(--acc-amber)"><i class="ti ti-user-check" aria-hidden="true"></i>you confirm</span>
+      </div>
+      <div class="ph">
+        <div class="num" style="border-color:var(--border-secondary);color:var(--text-secondary)">1</div>
+        <div style="flex:1"><div class="pname">Plan + tests</div><div class="muted" style="font-size:14px">Consensus on the cruxes; Architects author the acceptance tests in the repo's own framework.</div></div>
+        <span class="pill" style="flex:none"><i class="ti ti-user" aria-hidden="true"></i>you (optional)</span>
+      </div>
+      <div class="ph">
+        <div class="num" style="border-color:var(--border-secondary);color:var(--text-secondary)">2</div>
+        <div style="flex:1"><div class="pname">Implement</div><div class="muted" style="font-size:14px">Builders run best-of-N to green on the tests, lint, and types. Cheap leg, no Architect tokens.</div></div>
+        <span class="pill" style="flex:none"><i class="ti ti-bolt" aria-hidden="true"></i>hands-off</span>
+      </div>
+      <div class="ph">
+        <div class="num" style="border-color:var(--border-secondary);color:var(--text-secondary)">3</div>
+        <div style="flex:1"><div class="pname">Draft PR</div><div class="muted" style="font-size:14px">Branch pushed, a draft pull request opened.</div></div>
+        <span class="pill" style="flex:none"><i class="ti ti-bolt" aria-hidden="true"></i>hands-off</span>
+      </div>
+      <div class="ph">
+        <div class="num" style="border-color:var(--border-secondary);color:var(--text-secondary)">4</div>
+        <div style="flex:1"><div class="pname">Review</div><div class="muted" style="font-size:14px">Architects review with distinct lenses; one writes a breaking test. Findings route back to Builders.</div></div>
+        <span class="pill" style="flex:none"><i class="ti ti-bolt" aria-hidden="true"></i>hands-off</span>
+      </div>
+      <div class="ph">
+        <div class="num" style="border-color:var(--acc-amber);color:var(--acc-amber)">5</div>
+        <div style="flex:1"><div class="pname">Handoff</div><div class="muted" style="font-size:14px">A tiered, ready-for-review PR with goal, evidence, and open questions. The loop never self-merges.</div></div>
+        <span class="pill" style="flex:none;border-color:var(--acc-amber);color:var(--acc-amber)"><i class="ti ti-git-merge" aria-hidden="true"></i>you merge</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why it works</h2>
+    <div class="g4">
+      <div class="feat"><div style="display:flex;align-items:center;gap:.4rem"><i class="ti ti-target" style="color:var(--acc-purple)" aria-hidden="true"></i><span class="pname" style="font-size:14px">Objective oracle</span></div><div class="muted" style="font-size:13px;margin-top:.3rem">Architects write the tests; Builders make them green.</div></div>
+      <div class="feat"><div style="display:flex;align-items:center;gap:.4rem"><i class="ti ti-arrows-split" style="color:var(--acc-teal)" aria-hidden="true"></i><span class="pname" style="font-size:14px">Best-of-N</span></div><div class="muted" style="font-size:13px;margin-top:.3rem">Candidates compete; smallest green diff wins.</div></div>
+      <div class="feat"><div style="display:flex;align-items:center;gap:.4rem"><i class="ti ti-eyeglass" style="color:var(--acc-purple)" aria-hidden="true"></i><span class="pname" style="font-size:14px">Lens-diverse review</span></div><div class="muted" style="font-size:13px;margin-top:.3rem">Each Architect reviews a different way.</div></div>
+      <div class="feat"><div style="display:flex;align-items:center;gap:.4rem"><i class="ti ti-shield-lock" style="color:var(--acc-teal)" aria-hidden="true"></i><span class="pname" style="font-size:14px">Secret hygiene</span></div><div class="muted" style="font-size:13px;margin-top:.3rem">Models never see keys; outbound is scrubbed.</div></div>
+      <div class="feat"><div style="display:flex;align-items:center;gap:.4rem"><i class="ti ti-checkup-list" style="color:var(--acc-purple)" aria-hidden="true"></i><span class="pname" style="font-size:14px">Gates first</span></div><div class="muted" style="font-size:13px;margin-top:.3rem">No review token spent on a red diff.</div></div>
+      <div class="feat"><div style="display:flex;align-items:center;gap:.4rem"><i class="ti ti-git-branch" style="color:var(--acc-teal)" aria-hidden="true"></i><span class="pname" style="font-size:14px">Worktree isolation</span></div><div class="muted" style="font-size:13px;margin-top:.3rem">Each slice runs off a green baseline.</div></div>
+      <div class="feat"><div style="display:flex;align-items:center;gap:.4rem"><i class="ti ti-hand-stop" style="color:var(--acc-amber)" aria-hidden="true"></i><span class="pname" style="font-size:14px">Kill criteria</span></div><div class="muted" style="font-size:13px;margin-top:.3rem">Iteration caps + stop-and-ask on blockers.</div></div>
+      <div class="feat"><div style="display:flex;align-items:center;gap:.4rem"><i class="ti ti-git-pull-request" style="color:var(--acc-amber)" aria-hidden="true"></i><span class="pname" style="font-size:14px">No auto-merge</span></div><div class="muted" style="font-size:13px;margin-top:.3rem">The PR is always left for a human.</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>What's built</h2>
+    <div class="card">
+      <p class="muted" style="margin:0 0 .8rem;font-size:14px">Feature-complete end-to-end: stored onboarding with a Venice e2ee privacy lane; the Architect phases (intent · plan-consensus · acceptance-test oracle · lens-diverse review); the GitHub draft-PR + tiered handoff; guardrails (Seatbelt/Docker sandbox, destructive-command gating, worktree isolation, kill/stop-and-ask, suitability — sandbox live-verified); and a learned router (benchmark priors + this machine's local win-rates pick Builders per task, self-improving) with a KB assembler. Oracle-grounded and locally sovereign.</p>
+      <div class="row-pills">
+        <span class="pill" style="border-color:var(--acc-teal);color:var(--acc-teal)"><i class="ti ti-check" aria-hidden="true"></i>Onboarding + privacy lane</span>
+        <span class="pill" style="border-color:var(--acc-teal);color:var(--acc-teal)"><i class="ti ti-check" aria-hidden="true"></i>Intent &amp; plan consensus</span>
+        <span class="pill" style="border-color:var(--acc-teal);color:var(--acc-teal)"><i class="ti ti-check" aria-hidden="true"></i>Acceptance-test oracle</span>
+        <span class="pill" style="border-color:var(--acc-teal);color:var(--acc-teal)"><i class="ti ti-check" aria-hidden="true"></i>Best-of-N Builders</span>
+        <span class="pill" style="border-color:var(--acc-teal);color:var(--acc-teal)"><i class="ti ti-check" aria-hidden="true"></i>Adversarial review</span>
+        <span class="pill" style="border-color:var(--acc-teal);color:var(--acc-teal)"><i class="ti ti-check" aria-hidden="true"></i>GitHub draft PR + handoff</span>
+        <span class="pill" style="border-color:var(--acc-teal);color:var(--acc-teal)"><i class="ti ti-check" aria-hidden="true"></i>Sandbox + guardrails</span>
+        <span class="pill" style="border-color:var(--acc-teal);color:var(--acc-teal)"><i class="ti ti-check" aria-hidden="true"></i>Self-improving router</span>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Last updated 2026-06-22 · Keep the build-status row and milestone notes current as milestones land.<br>
+    Full design: <a href="design.md">docs/design.md</a> · Onboarding spec: <a href="superpowers/specs/2026-06-22-implement-onboarding-config-design.md">docs/superpowers/specs/2026-06-22-implement-onboarding-config-design.md</a>
+  </footer>
+
+</div>
+</body>
+</html>

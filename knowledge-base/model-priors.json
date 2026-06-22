@@ -1,0 +1,513 @@
+{
+  "schema": "model-priors/v1",
+  "as_of": "2026-06-22",
+  "note": "Cold-start prior from knowledge synthesis; refined by local outcome-learning (the M5 bandit) and pending live verification of flagged items.",
+  "domains": {
+    "general-coding": {
+      "sonnet": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Anthropic's Sonnet 4.x line is a top-tier general-coding workhorse: Sonnet 4.5 (released ~Sep 2025) posted leading SWE-bench Verified (~70-77% range reported by Anthropic) and strong Terminal-bench/agentic-coding results, with excellent multi-file refactor and instruction-following behavior in Claude Code. Sonnet 4.6 is an incremental successor to that line; I have no independently verified 4.6-specific benchmark numbers, but family priors and its router role as the default Builder put it strong for everyday Python/scripting, bugfixes, and small features. Behavioral: reliable diff/patch discipline, low hallucination on tool use. Treat the exact 4.6 SWE-bench number as unverified.",
+        "post_cutoff": true
+      },
+      "haiku": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Haiku 4.5 (released ~Oct 2025, pre-cutoff) is Anthropic's small/fast tier. Anthropic positioned it as near-Sonnet-4 coding quality at much lower latency/cost; reported SWE-bench Verified in the high-60s%/low-70s% range, strong relative to its size class. For everyday scripting, bugfixes, and small features it is a solid moderate — good cost/latency tradeoff, but weaker than Sonnet/Opus on deeper multi-file reasoning and long-horizon agentic tasks. Good default for cheap Builder attempts in a best-of-N pool.",
+        "post_cutoff": false
+      },
+      "claude": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Opus 4.x is Anthropic's frontier reasoning/coding tier and is the model running this evaluation. Opus 4.5/4.6 set top SWE-bench Verified scores (~80%+ reported for the Opus 4.x line in late 2025) and lead on hard agentic-coding and architecture-level tasks. Opus 4.8 is an incremental frontier successor; no independently verified 4.8-specific public benchmark in my data, hence medium confidence on the exact number, but family priors make it strong for general-coding (arguably over-powered/expensive for everyday scripting — better reserved for Architect tier). Behavioral: best-in-class planning, refactor decomposition, and tool discipline.",
+        "post_cutoff": true
+      },
+      "gpt": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "OpenAI's GPT-5 line (GPT-5 / GPT-5-Codex, ~Aug-Sep 2025) is a frontier coding tier with top SWE-bench Verified (~70s%) and strong LiveCodeBench/competitive-programming results; GPT-5-Codex with high reasoning effort is a leading agentic coder. GPT-5.5 is an incremental successor (the skill runs it at effort=xhigh via codex_mcp as an Architect). No independently verified 5.5-specific public benchmark in my data, so medium confidence on the exact placement, but family priors put it strong for general-coding. Behavioral: very strong at hard reasoning/algorithmic tasks; verbose; occasionally over-engineers small fixes.",
+        "post_cutoff": true
+      },
+      "deepseek": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "DeepSeek's V3/V3.1/R1 line (2024-2025) is the strongest open-weight general-coding family I have verified data on — DeepSeek-V3 and R1 posted competitive SWE-bench Verified, LiveCodeBench, MATH/AIME and Aider results, near-frontier among open models. 'V4-Pro' is a later named release I have NO verified benchmarks for; I infer moderate from the family trajectory (likely strong open-weight coder) but flag it post_cutoff with low confidence. Dogfood note in this repo's memory: an external openrouter/deepseek call returned empty/non-converging in one live run — a deployment/plumbing caveat, not a capability verdict. Verify against LiveCodeBench + SWE-bench Verified.",
+        "post_cutoff": true
+      },
+      "minimax": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "MiniMax's M-series (MiniMax-M1, mid-2025) is a long-context MoE with reasonable but not frontier coding results on LiveCodeBench/SWE-bench-style evals; competent open-weight coder, strong long-context. 'M3' is a later named release I have NO verified benchmarks for. Inferring moderate from the family trajectory, post_cutoff, low confidence. Behavioral expectation: usable for everyday scripting, weaker than DeepSeek/Kimi top tier on hard multi-file tasks. Verify against LiveCodeBench and SWE-bench Verified.",
+        "post_cutoff": true
+      },
+      "kimi": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Moonshot's Kimi K2 (July 2025, ~1T-param MoE / ~32B active) was a standout open-weight agentic-coding model: strong SWE-bench Verified (reported ~65-70% agentic) and good Terminal-bench/tool-use, explicitly tuned for coding/agents. The pool uses 'kimi-k2.7-code', a code-specialized later point release I have NO verified benchmarks for. Family trajectory suggests this could be strong-for-open-weight, but I mark moderate/low-confidence/post_cutoff pending verification. Config note: requires temperature=1. Verify k2.7-code specifically against SWE-bench Verified and LiveCodeBench / SWE-bench Multimodal-free agentic leaderboards.",
+        "post_cutoff": true
+      },
+      "glm": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Zhipu/Z.ai's GLM-4.5/4.6 (2025) line is a capable open-weight agentic-coding family — GLM-4.6 posted competitive SWE-bench Verified and strong real-world coding-agent results, popular as a cheap Claude-Code-compatible Builder. 'GLM 5.2' is a later named release I have NO verified benchmarks for. Inferring moderate from the 4.x trajectory (the 4.6 generation was already solid for everyday coding), post_cutoff, low confidence. Served here via Venice e2ee privacy router (venice-glm = e2ee-glm-5-2-p; same underlying weights as glm). Verify GLM 5.2 against SWE-bench Verified and LiveCodeBench.",
+        "post_cutoff": true
+      },
+      "venice-qwen": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Real, released Alibaba model (Qwen3 family, ~April 2025): 30B-total MoE with ~3B active params. The Qwen3 / Qwen2.5-Coder lineage is a respected open-weight coder; this small-active MoE variant punches above its active-param count on LiveCodeBench/EvalPlus/BigCodeBench for everyday Python but is clearly below frontier and below the larger DeepSeek/Kimi MoEs on hard multi-file/agentic tasks. Solid cheap moderate for routine scripting/bugfixes; expect more failures on complex refactors. A 'Qwen3.x' refresh may exist post-cutoff — confirm this exact checkpoint id against Venice's model list and LiveCodeBench.",
+        "post_cutoff": false
+      },
+      "venice-gpt-oss": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "OpenAI's open-weight gpt-oss-120b (released ~Aug 2025, pre-cutoff): MoE (~117B total / ~5B active) with configurable reasoning effort. Reported competitive on reasoning (AIME/MMLU) and decent on coding evals (LiveCodeBench/Codeforces-style) for an open-weight model, roughly o4-mini-class on several reported metrics, but below frontier closed coders and somewhat uneven on long agentic coding / tool discipline. A reasonable moderate cheap Builder for everyday Python; verify high-reasoning-effort coding behavior against LiveCodeBench and SWE-bench Verified.",
+        "post_cutoff": false
+      }
+    },
+    "algorithmic-math": {
+      "sonnet": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Anthropic's mid-2025 Sonnet 4.x line posts strong results on competition-style coding (LiveCodeBench, SWE-bench Verified) and solid AIME/MATH math reasoning, typically near the top among non-frontier-tier models. Sonnet 4.6 is an incremental successor to publicly-benchmarked Sonnet 4/4.5; expect strong algorithmic reasoning with extended thinking, slightly below Opus-tier on the hardest contest math. Behaviorally reliable at structured proofs and step-by-step DP/graph algorithm derivation. Exact 4.6 leaderboard placement should be confirmed.",
+        "post_cutoff": false
+      },
+      "haiku": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Haiku 4.5 (late-2025 small/fast tier) trades raw reasoning for latency/cost. On LiveCodeBench and AIME/MATH it lands clearly below Sonnet/Opus but is competent on standard algorithmic problems (sorting, DP, greedy, basic number theory). Weaker on multi-step contest math and long proofs where small models drop reasoning chains. Good as a cheap first-pass Builder, not for hardest problems.",
+        "post_cutoff": false
+      },
+      "claude": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Architect-tier frontier model (the model authoring this analysis). Opus 4.x leads Anthropic's line on extended-thinking math/algorithm reasoning: top-tier AIME/MATH, strong LiveCodeBench and SWE-bench Verified, reliable on contest-style DP/graph/number-theory and proof construction. Best-in-pool for hardest algorithmic-math among the Anthropic models. 4.8-specific public numbers are thin; placement inferred from the 4.x trajectory.",
+        "post_cutoff": false
+      },
+      "gpt": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "OpenAI frontier Architect-tier line. The GPT-5 family established top-tier AIME (high pass@1 with tools/reasoning), MATH, and LiveCodeBench/Codeforces-style performance; GPT-5.5 is its successor and should sit at or above that on algorithmic-math, historically among the very strongest on competition math and reasoning. Behaviorally excellent at long multi-step derivations. Exact 5.5 leaderboard numbers are recent/thin and should be verified.",
+        "post_cutoff": true
+      },
+      "deepseek": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "DeepSeek's R1/V3 and the reasoning line were standout open performers on AIME, MATH-500, and LiveCodeBench through 2025, rivaling closed frontier models on contest math. A V4-Pro successor is plausibly at/after the cutoff; given the lineage's math-reasoning strength I rate strong but with low confidence because the specific V4-Pro release and its leaderboard placement are not in my reliable data. Verify before trusting.",
+        "post_cutoff": true
+      },
+      "minimax": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "MiniMax's earlier M-series (e.g. MiniMax-01/M1 long-context MoE models) showed competitive but not frontier reasoning on standard math/code benchmarks. M3 is likely at/after the cutoff with thin public data. Provisionally moderate on algorithmic-math; could be higher if M3 added a strong reasoning mode. Needs leaderboard confirmation.",
+        "post_cutoff": true
+      },
+      "kimi": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Moonshot's Kimi K2 (2025) was a strong open agentic/coding MoE with respectable LiveCodeBench and math results, though more known for agentic/tool-use and coding than pure contest math. k2.7 is an incremental successor likely at/after the cutoff. Provisional moderate-to-strong; rate moderate pending verification of its AIME/LiveCodeBench placement.",
+        "post_cutoff": true
+      },
+      "glm": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Zhipu's GLM-4.x line (incl. GLM-4.5/4.6 reasoning variants) was competitive on coding (LiveCodeBench, SWE-bench) and math reasoning among open models in 2025. GLM 5.2 is a later successor, likely at/after the cutoff. The lineage trends strong on coding and decent on math; rate moderate with low confidence until current AIME/LiveCodeBench numbers are checked. (venice-glm = e2ee-glm-5-2-p, same weights.)",
+        "post_cutoff": true
+      },
+      "venice-qwen": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Qwen3-30B-A3B is a known 2025 MoE (~30B total, ~3B active) with a thinking mode; it punches above its active-parameter weight on AIME, MATH, and LiveCodeBench for its size, but as a small-active MoE it trails large frontier models on the hardest contest math and long proofs. Solid efficient Builder for standard-to-moderate algorithmic problems. Reasonably documented pre/around cutoff.",
+        "post_cutoff": false
+      },
+      "venice-gpt-oss": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "OpenAI's open-weight gpt-oss-120b (released 2025) has a configurable reasoning effort and posted competitive AIME and MMLU/GPQA results for an open model, with decent LiveCodeBench coding. Strong for an open-weight model on math reasoning but below closed frontier tier; can be brittle on the very hardest contest problems. Rate moderate (arguably strong at high reasoning effort) — verify current placement.",
+        "post_cutoff": false
+      }
+    },
+    "web-frontend": {
+      "sonnet": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Claude Sonnet line is the reference frontend workhorse. Sonnet 4.x family sits at/near the top of WebDev Arena / DesignArena human-preference boards for generated UIs (2025), and posts top-tier SWE-bench Verified (~70%+ range) and strong Aider polyglot edit-format adherence — the latter matters for clean React/TS diffs. Behavioral: reliably idiomatic React/hooks, good Tailwind/CSS, respects component boundaries, low syntax-error rate. Sonnet 4.6 is an incremental bump on 4.5; I have direct data on 4.5 and treat 4.6 as >= that. Best balance of cost/quality for a default Builder in this domain.",
+        "post_cutoff": false
+      },
+      "haiku": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Haiku 4.5 (late 2025) punches above its size — Anthropic positioned it near prior-gen Sonnet on SWE-bench Verified (reported ~70%-ish in announcement materials) at a fraction of the cost/latency. For frontend that means competent React/TS scaffolding and edits, but weaker on visual taste and multi-file consistency than Sonnet/Opus. Good 'cheap Builder' for well-specified component tasks; expect more iterations on ambiguous UI/design work. Confidence medium because most Haiku 4.5 evidence is SWE-bench-centric, not frontend-specific (WebDev Arena placement for Haiku is less established).",
+        "post_cutoff": false
+      },
+      "claude": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Opus 4.x is Anthropic's frontier tier and tops/co-tops SWE-bench Verified and WebDev Arena-style design-preference boards. Strongest on hard multi-file frontend refactors, browser-API edge cases, accessibility, and design judgment. As the Architect tier its cost makes it overkill for routine component work, but for the hardest web-frontend tasks it is a top-2 choice. (Self-note: I am this model; rating is based on the 4.x Opus public track record, not self-flattery — it is consistently frontier on the named coding/design boards.)",
+        "post_cutoff": false
+      },
+      "gpt": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "GPT-5 family (and Codex variants) are frontier on SWE-bench Verified (~70-75% range reported through 2025) and very strong on LiveCodeBench and Aider polyglot; excellent at TS type-level reasoning and browser-API correctness. On WebDev/DesignArena human-preference for raw UI aesthetics, GPT-5-class has historically been competitive-but-sometimes-behind Claude, though gap is small and task-dependent. GPT-5.5 specifically is at/just-around my cutoff — I infer 'strong' from the 5.x trajectory but haven't seen stable GPT-5.5 leaderboard numbers, hence medium confidence. Architect-tier cost.",
+        "post_cutoff": true
+      },
+      "deepseek": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "DeepSeek's V3/R1 line (2025) was strong on math/reasoning (AIME, MATH) and respectable on LiveCodeBench and SWE-bench, but historically weaker on frontend visual taste and idiomatic React/CSS than the Claude/GPT frontier — its strength skews algorithmic. 'V4-Pro' is a named successor I have little-to-no direct benchmark data on; it postdates my cutoff. Provisional 'moderate' assuming continued coding gains, but frontend/UI quality specifically is unverified. Treat as a capable-but-unproven mid-tier Builder for structured (non-design-heavy) component work.",
+        "post_cutoff": true
+      },
+      "minimax": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "MiniMax's M-series (M1/M2 in 2025) were agentic/long-context-oriented open models with decent LiveCodeBench/SWE-bench showings but limited public frontend-specific signal. 'M3' is beyond my cutoff with no leaderboard data I can cite. Provisional 'moderate' as a long-context agentic Builder; frontend visual quality and React idioms are unverified. Could plausibly be weak-to-moderate on CSS/design tasks specifically.",
+        "post_cutoff": true
+      },
+      "kimi": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Moonshot's Kimi K2 (2025) was a notably strong open-weight agentic/coding MoE — competitive on SWE-bench Verified and LiveCodeBench among open models, and showed surprisingly good tool-use and front-end scaffolding in community reports. 'k2.7' is an incremental successor past my cutoff. I lean 'moderate' (possibly underrating) based on K2's strong agentic-coding reputation, but frontend-specific and the .7 bump are unverified. One of the more promising open Builders to watch.",
+        "post_cutoff": true
+      },
+      "glm": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Zhipu's GLM-4.5/4.6 (2025) were explicitly strong at agentic coding and notably at front-end/web generation — GLM-4.5 was marketed with full-stack web demos and placed well on coding/agent boards among open models; it appeared on WebDev Arena-style comparisons. If that trajectory holds, GLM 5.2 could be one of the better open frontend Builders. But '5.2' is past my cutoff with no numbers I can cite, so confidence is low. Provisional 'moderate', plausibly 'strong' for web-frontend specifically — flag for priority verification. (venice-glm = e2ee-glm-5-2-p, same weights.)",
+        "post_cutoff": true
+      },
+      "venice-qwen": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Qwen3-30B-A3B is a 30B-total / ~3B-active MoE from the Qwen3 line (2025) — efficient, strong reasoning-per-active-param, decent LiveCodeBench/BigCodeBench for its size. As a small-active MoE it is a capable cheap Builder for well-specified TS/React edits but will trail frontier dense/large models on complex multi-file frontend and design taste. The specific A3B variant predates cutoff in concept but I lack frontend-specific numbers. 'Moderate' leaning weak-to-moderate for ambiguous UI work; good cost/latency story.",
+        "post_cutoff": false
+      },
+      "venice-gpt-oss": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "OpenAI's open-weight gpt-oss-120b (released ~Aug 2025) is a MoE (~117B total / ~5B active) that benchmarked near o3-mini/o4-mini-class on reasoning and was solid on coding/LiveCodeBench for an open model, with configurable reasoning effort. Frontend-specific quality is less documented; as a relatively small-active MoE expect competent-but-not-frontier React/CSS, trailing the Claude/GPT frontier on design taste and multi-file consistency. 'Moderate' as a cheap open Builder; verify on a frontend-weighted board.",
+        "post_cutoff": false
+      }
+    },
+    "systems-backend": {
+      "sonnet": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Sonnet lineage (3.5/3.7/4/4.5) has been the workhorse agentic-coding tier: Claude Sonnet 4.5 led SWE-bench Verified (~77-82% reported Sep 2025) and posts strong Terminal-Bench and real-repo agentic edit scores — exactly the multi-file, tool-using, repo-context profile that systems-backend work (APIs, refactors, DB layers) rewards. Sonnet 4.6 is the incremental successor; family trajectory points to at/above 4.5. Behavioral prior: reliable diff/patch discipline, good at honoring existing conventions, lower hallucination on infra glue than open models. Exact 4.6 numbers not in my training data.",
+        "post_cutoff": true
+      },
+      "haiku": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Haiku 4.5 (released ~Oct 2025) was positioned as 'near-frontier coding at fraction of cost' — Anthropic reported SWE-bench Verified in the ~73% range, close to mid-2025 Sonnet, strong for its tier. Good for well-scoped backend tasks (single endpoint, a query, a concurrency fix) but weaker than Sonnet/Opus on long-horizon distributed-systems reasoning and large-context multi-file changes. Solid cost-efficient Builder; not the pick for the hardest infra problems.",
+        "post_cutoff": false
+      },
+      "claude": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Opus is Anthropic's top reasoning/coding tier; Opus 4.1 (Aug 2025) and 4.5 posted frontier SWE-bench Verified (~74-80%+) and lead on hard multi-step agentic tasks, planning, and ambiguous-spec decomposition — the Architect-tier strengths for distributed-systems design and tricky concurrency. 4.8 is a later point release; trajectory is at/above prior Opus. I am the running model here, but I have no independent 4.8 benchmark numbers in training data, hence medium confidence.",
+        "post_cutoff": true
+      },
+      "gpt": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "GPT-5 / GPT-5-Codex (2025) posted frontier SWE-bench Verified (~72-75%), top-tier LiveCodeBench and competitive-programming/AIME results, and strong agentic terminal performance via Codex; at xhigh reasoning effort it is a leading architect-class model for systems design, algorithms, and performance reasoning. GPT-5.5 is the unreleased-in-my-data successor; family trajectory supports strong, but exact 5.5 numbers are not in training data — verify.",
+        "post_cutoff": true
+      },
+      "deepseek": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "DeepSeek line (V3, V3.1, R1) has been the strongest open-weight family for code+reasoning: V3/R1 posted competitive LiveCodeBench, AIME and respectable SWE-bench Verified (open-model leader band, ~60-70% with scaffolding) and strong on algorithmic/backend logic. V4-Pro is a named successor beyond my cutoff — plausibly the top open model for systems-backend, but I have no V4-Pro benchmark numbers. Behavioral caveat: open models historically need more scaffolding for clean multi-file patches than Claude/GPT.",
+        "post_cutoff": true
+      },
+      "minimax": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "MiniMax M2 (late 2025) was marketed as an agentic/coding-focused MoE with long context and competitive cost, showing decent SWE-bench/agentic-tool results in its release materials but below the DeepSeek/Qwen open frontier on independent code benchmarks. M3 is post-cutoff with no benchmark data in my training. Treat as a mid-tier open Builder until LiveCodeBench/SWE-bench Verified numbers are confirmed; coding-agent positioning is a positive signal but unverified.",
+        "post_cutoff": true
+      },
+      "kimi": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Kimi K2 (Moonshot, mid-2025) was a large-MoE that scored well on agentic coding/tool-use (notably strong on SWE-bench Verified for an open model, ~65-71% band with agent scaffolding, and competitive on LiveCodeBench). The 'k2.7-code' variant is code-specialized, a positive signal for backend patch work. k2.7 is post-cutoff; no specific numbers in training data. Behavioral note: K2-family known for solid tool-calling, which suits the OW patch->apply->gate loop.",
+        "post_cutoff": true
+      },
+      "glm": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Zhipu GLM-4.5/4.6 (2025) emerged as a genuinely strong agentic-coding open family — GLM-4.6 posted SWE-bench Verified and agentic-tool results competitive with or above DeepSeek/Qwen in the open tier, and is widely used as a coding-agent backend. GLM 5.2 is the post-cutoff successor (also listed as an Architect-tier option), so trajectory suggests strong, but I have no 5.2 numbers. Rated moderate pending verification; could plausibly be strong. (venice-glm = e2ee-glm-5-2-p, same weights.)",
+        "post_cutoff": true
+      },
+      "venice-qwen": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Qwen3-30B-A3B is a known mid-2025 MoE (30B total / ~3B active). For its size it punched above weight on LiveCodeBench, AIME and BigCodeBench, but as a small-active-param MoE it sits below the large open frontier (DeepSeek-V3, GLM-4.6, Kimi-K2) on hard multi-file SWE-bench Verified and long-horizon agentic tasks. Good cheap Builder for scoped backend edits; weaker on large-context distributed-systems reasoning. This is the most pre-cutoff-anchored of the open models here.",
+        "post_cutoff": false
+      },
+      "venice-gpt-oss": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "OpenAI's open-weight gpt-oss-120b (Aug 2025) reported strong reasoning/AIME and competitive coding for an open model, with configurable reasoning effort; independent evals placed it good-but-not-class-leading on agentic SWE-bench Verified versus DeepSeek/GLM/Kimi, and it can be verbose/over-refuse. Reasonable open Builder for algorithmic/perf reasoning; verify current LiveCodeBench/SWE-bench standing as scaffolding and harnesses have moved fast.",
+        "post_cutoff": false
+      }
+    },
+    "smart-contracts": {
+      "sonnet": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Sonnet 4.x line is consistently top-tier on SWE-bench Verified (~70%+ agentic) and Aider polyglot, and is the workhorse model for agentic coding harnesses (Claude Code). General code strength transfers well to Solidity; Anthropic models tend to handle Foundry/forge test scaffolding, multi-file edits, and security reasoning (reentrancy, access control, checked arithmetic) better than size-peers. No NAMED Solidity-specific public benchmark exists, so this is inferred from SWE-bench Verified / LiveCodeBench placement plus strong observed real-world Solidity behavior. Domain-specific gas-golf and obscure EVM-assembly (Yul) edge cases remain a relative soft spot vs. specialized tooling.",
+        "post_cutoff": false
+      },
+      "haiku": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Haiku 4.5 is a fast/cheap tier; on general code benchmarks (SWE-bench Verified, LiveCodeBench) it lands well below Sonnet/Opus but is respectable for its cost and strong at well-scoped, single-file edits and test generation. For Solidity it is a good Builder for mechanical changes (interface impl, event wiring, simple Foundry tests) but weaker on multi-contract security reasoning and gas optimization. No NAMED Solidity benchmark; rating inferred from general-code placement and tier positioning.",
+        "post_cutoff": false
+      },
+      "claude": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Opus 4.8 is Anthropic's frontier reasoning model and near/at the top of SWE-bench Verified and agentic coding leaderboards as of early 2026. Strongest of the panel on deep security reasoning, cross-contract invariants, and adversarial threat modeling — the qualities that matter most for on-chain security. Used as Architect tier here, which is the correct role. Still no NAMED Solidity-specific public benchmark; placement inferred from frontier general-code/reasoning results (SWE-bench Verified, LiveCodeBench, GPQA, AIME). I am this model, so I can speak to behavior but should not over-claim a Solidity-specific number.",
+        "post_cutoff": false
+      },
+      "gpt": {
+        "rating": "strong",
+        "confidence": "medium",
+        "evidence": "GPT-5.x (OpenAI) is a frontier line that trades blows with Opus on SWE-bench Verified, LiveCodeBench, and AIME/math; at xhigh reasoning effort it is excellent at hard, well-specified coding and security analysis. Strong prior for Solidity Architect work. Confidence is medium not high because GPT-5.5 specifically may be a point release at/near my cutoff and I lack a NAMED Solidity benchmark for it; the 5.x family trajectory is well-established but the exact 5.5 placement should be verified. Known behavioral note: GPT-5 line is strong at spec-following and adversarial reasoning, occasionally verbose/over-engineering in agentic diffs.",
+        "post_cutoff": false
+      },
+      "deepseek": {
+        "rating": "moderate",
+        "confidence": "low",
+        "evidence": "The DeepSeek V3/R1 generation was a strong open-weight coder (competitive on SWE-bench Verified, LiveCodeBench, Aider polyglot, MATH/AIME) at low cost, and DeepSeek has a good track record on code/reasoning. 'V4-Pro' implies a generation past my reliable data — I have NO confirmed benchmarks for it and it is likely at/after the cutoff. Prior of 'moderate' is anchored to the family's strong coding lineage, but exact Solidity ability and V4-Pro's leaderboard placement are unverified. Treat as a promising-but-unproven Builder pending current leaderboard checks.",
+        "post_cutoff": true
+      },
+      "minimax": {
+        "rating": "weak",
+        "confidence": "low",
+        "evidence": "MiniMax's earlier text/M-series models were mid-pack on general code/reasoning benchmarks and not known as standout coders; long-context was a selling point. 'M3' is past my reliable data and likely post-cutoff. With no NAMED code benchmark confirming a coding leap, I set a conservative 'weak' prior for the demanding smart-contracts domain, but confidence is low — if M3 is a coding-focused release it could be materially better. Must be verified against LiveCodeBench / SWE-bench Verified before trusting.",
+        "post_cutoff": true
+      },
+      "kimi": {
+        "rating": "moderate",
+        "confidence": "low",
+        "evidence": "Moonshot's Kimi K2 (2025) was a notable open-weight agentic/coding MoE that posted competitive SWE-bench Verified and strong agentic-tool-use results, and the 'k2.7-code' variant here is explicitly code-tuned. That lineage supports a 'moderate' prior for Solidity Builder work. But 'k2.7' is a point release past my reliable data (post-cutoff) and I have no confirmed numbers for it or any Solidity-specific eval. Behavioral note: K2 line runs at temperature ~1 (per config) and is agentic-leaning. Verify on LiveCodeBench / SWE-bench Verified.",
+        "post_cutoff": true
+      },
+      "glm": {
+        "rating": "moderate",
+        "confidence": "low",
+        "evidence": "Z.ai's GLM-4.5/4.6 generation became a credible open-weight agentic-coding model (competitive SWE-bench Verified, used in coding agents, decent Aider/LiveCodeBench results). GLM 5.2 implies a further generation past my reliable data (post-cutoff). Family trajectory justifies a 'moderate' prior — plausibly a capable Builder and even listed as an Architect-tier option here — but I have no confirmed GLM 5.2 benchmarks and no Solidity-specific eval. Verify current placement before promoting to 'strong'. (venice-glm = e2ee-glm-5-2-p, same weights.)",
+        "post_cutoff": true
+      },
+      "venice-qwen": {
+        "rating": "weak",
+        "confidence": "medium",
+        "evidence": "Qwen3-30B-A3B is a known 2025 MoE (~30B total, ~3B active). It is a solid small/efficient model — decent on LiveCodeBench, BigCodeBench, MATH/AIME for its size — but its small active-parameter count caps it well below frontier coders on hard, multi-file, security-sensitive Solidity tasks. 'Weak' for this demanding domain is a fair prior; medium confidence because this is a model I actually have data on (not post-cutoff). Good for cheap mechanical Builder steps, not for security/invariant reasoning.",
+        "post_cutoff": false
+      },
+      "venice-gpt-oss": {
+        "rating": "moderate",
+        "confidence": "medium",
+        "evidence": "OpenAI's open-weight gpt-oss-120b (released 2025) benchmarked competitively with mid-tier reasoning models on AIME, MMLU, and coding evals (roughly o3-mini/o4-mini class on several), with configurable reasoning effort. Reasonable general coder, so 'moderate' for Solidity Builder work is defensible. Medium confidence: I have real data on it (not post-cutoff), but no NAMED Solidity benchmark and known caveats (weaker tool-use/agentic robustness, more hallucination than frontier models). Verify on LiveCodeBench / SWE-bench Verified for agentic Solidity.",
+        "post_cutoff": false
+      }
+    },
+    "data-analysis": {
+      "sonnet": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Anchored on the Claude Sonnet 4.x line, which sits at/near the top of agentic coding leaderboards: Sonnet 4 / 3.7 posted leading SWE-bench Verified scores (Sonnet 4 ~72-80% with scaffolding, 2025) and strong Aider polyglot and LiveCodeBench placements. For data-analysis specifically, Claude models are consistently strong at pandas/numpy idioms, SQL generation (Spider/BIRD-class tasks), and notebook-style multi-step wrangling, and follow tabular schemas reliably with low hallucination. Excellent instruction-following and tool-use make it a dependable Builder for data wrangling. The exact '4.6' point release is past my Jan 2026 cutoff so I cannot cite its own numbers, but the family trajectory is firmly upward. Treat as a top general-purpose Builder for this domain.",
+        "post_cutoff": true
+      },
+      "haiku": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Anchored on the Haiku 4.x small/fast tier. Claude Haiku 3.5 already matched or beat the prior-gen mid model on several coding tasks; the 4.5 line is reported to land near older Sonnet-tier coding quality at much lower cost/latency. For data-analysis (pandas/SQL/notebook wrangling) this means competent, low-hallucination single-pass code on routine transforms, but a measurable gap vs. Sonnet/Opus on multi-step stats reasoning and large/ambiguous schema tasks. Good cheap-Builder/best-of-N volume pick. No domain-specific DS-1000/DABench number I can cite for 4.5 specifically; rating is by tier placement. Version is post-cutoff.",
+        "post_cutoff": true
+      },
+      "claude": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Anchored on the Claude Opus 4.x flagship line, historically the strongest Claude tier on SWE-bench Verified, hard reasoning, and long-horizon multi-step coding. For data-analysis it brings the best in-family handling of complex stats reasoning, multi-table joins/SQL, and ambiguous wrangling specs, plus strong self-correction. Used here as Architect (planning/test-authoring/review) rather than Builder volume, which is its strength. I cannot cite Opus-4.8-specific benchmark numbers (post Jan 2026 cutoff); confidence medium on the exact release, high on the tier being domain-strong. Note: I am this model, which is a reason to externally verify rather than self-rate high.",
+        "post_cutoff": true
+      },
+      "gpt": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Anchored on the GPT-5 frontier line via Codex (xhigh reasoning effort). GPT-5-class models are top-tier on SWE-bench Verified, LiveCodeBench, AIME/MATH (strong quantitative-stats proxy for data-analysis), and Spider/BIRD-style SQL. Particularly strong at the numeric/statistical reasoning that data-analysis tasks lean on, and Codex agentic scaffolding handles multi-cell notebook workflows well. Used as Architect tier. Exact 'GPT-5.5' point release is past my Jan 2026 cutoff so I cannot cite its own scores; family placement is top-bracket. Confidence medium pending live leaderboard confirmation of the .5 release.",
+        "post_cutoff": true
+      },
+      "deepseek": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Anchored on the DeepSeek-V3/V3.1 and R1 lineage, which were near-frontier open-weight on coding and math: strong LiveCodeBench, BigCodeBench, MATH/AIME, and competitive SWE-bench Verified for an open model. That math/code strength maps well to pandas/numpy + statistical data-analysis. 'V4-Pro' is squarely post my Jan 2026 cutoff — I have NO direct benchmark data on it and am extrapolating from the V3/R1 trajectory, so confidence is low despite a strong rating. It is the team's primary OW Builder (confirmed live-driving a fixture green in this project). Verify the V4-Pro numbers before trusting the 'strong'.",
+        "post_cutoff": true
+      },
+      "minimax": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Anchored on MiniMax's M-series (e.g., MiniMax-01/M1), long-context MoE models that were mid-pack on general coding/agentic benchmarks (LiveCodeBench, SWE-bench-style) — usable but below the DeepSeek/Qwen-235B open-weight frontier. For data-analysis its long context helps with large schemas/notebooks, but I have no DS-1000/DABench/Spider number for the M-series and cannot vouch for stats-reasoning depth. 'M3' is post my Jan 2026 cutoff with thin data. Rating is a cautious mid-prior; verify against LiveCodeBench/BigCodeBench current standings.",
+        "post_cutoff": true
+      },
+      "kimi": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Anchored on Moonshot's Kimi K2 (mid-2025), a large MoE that posted notably strong agentic-coding and tool-use results — competitive SWE-bench Verified and LiveCodeBench among open weights, and good Python codegen — which is why this config pins a code-tuned 'k2.7-code' variant as a Builder. That maps well to pandas/SQL data-analysis tasks. However 'k2.7' is past my Jan 2026 cutoff; I'm extrapolating from K2's profile, so confidence is low. Verify k2.7-code on LiveCodeBench / SWE-bench Verified before trusting 'strong'.",
+        "post_cutoff": true
+      },
+      "glm": {
+        "rating": "moderate",
+        "confidence": "high",
+        "evidence": "Anchored on Zhipu/Z.ai's GLM-4.5/4.6 line, which were among the strongest open-weight agentic-coding models of late 2025 — strong SWE-bench Verified, BigCodeBench, and Aider/LiveCodeBench placements, and explicitly tuned for tool-use/agent loops (hence its promotion to the Architect tier here). Good fit for SQL/pandas codegen and multi-step wrangling. 'GLM 5.2' is post my Jan 2026 cutoff; extrapolated from the 4.5/4.6 trajectory, so confidence is low. Also exposed via the Venice e2ee privacy lane (venice-glm = e2ee-glm-5-2-p). Verify GLM 5.2 on current coding leaderboards.",
+        "post_cutoff": true
+      },
+      "venice-qwen": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Anchored on Qwen3-30B-A3B (30B total / ~3B active MoE), a strong-for-its-size 2025 release: solid LiveCodeBench, BigCodeBench, MATH/AIME for a small active-param model, and good pandas/numpy/SQL codegen, though clearly below the 235B-A22B flagship and the frontier open models on hard multi-step data-analysis and deep stats reasoning. As a small fast MoE it is a good cheap/privacy Builder (here on the Venice e2ee lane) but expect more misses on complex joins/ambiguous wrangling. The A3B family is borderline around my Jan 2026 cutoff; treat numbers as approximate. Verify the exact checkpoint on DS-1000/DABench and LiveCodeBench.",
+        "post_cutoff": true
+      },
+      "venice-gpt-oss": {
+        "rating": "weak",
+        "confidence": "high",
+        "evidence": "Anchored on OpenAI's gpt-oss-120b open-weight release (Aug 2025), a ~120B MoE (~5B active) reported competitive with o3-mini/o4-mini-class reasoning on MMLU/GPQA/AIME/coding for an open model, with adjustable reasoning effort. Decent for Python data-analysis codegen and quantitative reasoning, but below the largest open models on long-horizon agentic coding (SWE-bench Verified) and prone to more brittle tool-use. Used here on the Venice e2ee privacy lane. The base model is near/just-before my cutoff so confidence is low-medium on the family but I keep it low given the version/serving specifics. Verify on LiveCodeBench/BigCodeBench and a DS-specific bench (DS-1000/DABench).",
+        "post_cutoff": true
+      }
+    }
+  },
+  "needs_verification": [
+    "sonnet: confirm Sonnet 4.6-specific SWE-bench Verified + Terminal-bench numbers against Anthropic's official model card / release notes — currently inferred from Sonnet 4.5 family priors.",
+    "claude: confirm Opus 4.8-specific SWE-bench Verified + agentic/long-horizon numbers vs Opus 4.5/4.1 on Anthropic's model card — exact frontier number unverified.",
+    "gpt: confirm GPT-5.5-specific SWE-bench Verified / LiveCodeBench / AIME / SWE-bench agentic numbers vs GPT-5 / GPT-5-Codex on OpenAI's release notes; verify codex_mcp effort=xhigh behavior.",
+    "deepseek: no verified benchmarks for V4-Pro — check LiveCodeBench, SWE-bench Verified, Aider polyglot, and a DS bench (DS-1000/DABench); also re-test the openrouter deepseek endpoint that returned empty in the prior dogfood run.",
+    "minimax: no verified benchmarks for M3 — check LiveCodeBench, SWE-bench Verified, and BigCodeBench; confirm context window and coding placement vs DeepSeek/Kimi; determine whether M3 is a coding-focused release before trusting the conservative smart-contracts 'weak' prior.",
+    "kimi: verify 'kimi-k2.7-code' specifically (not K2 base) on SWE-bench Verified, LiveCodeBench, and agentic Terminal-bench; confirm code-variant pandas/SQL performance vs base k2.7.",
+    "glm: no verified benchmarks for GLM 5.2 — check SWE-bench Verified, LiveCodeBench, and BigCodeBench; confirm Venice e2ee model id 'e2ee-glm-5-2-p' resolves to the intended weights; decide Builder vs Architect tier from real numbers (GLM-4.x was strong at web frontend, so 5.2 could merit 'strong' there).",
+    "venice-qwen: confirm exact checkpoint id 'e2ee-qwen3-30b-a3b-p' against Venice's /models list (thinking vs non-thinking, 2507 update) and whether a newer Qwen3.x A3B refresh exists; place on current LiveCodeBench/BigCodeBench and a frontend-weighted board; check whether it is pre- or post-cutoff.",
+    "venice-gpt-oss: verify high-reasoning-effort coding behavior and current LiveCodeBench/SWE-bench Verified placement; confirm Venice serves the 120b (not 20b) variant and which reasoning-effort setting is used; find frontend-specific results (not just MMLU/AIME).",
+    "haiku: locate a frontend-specific board placement (WebDev Arena) rather than relying on SWE-bench Verified to confirm 'moderate' on design/visual tasks.",
+    "All models: there is no NAMED public Solidity/Foundry benchmark in the evidence — find or stand up a smart-contract-specific eval (Foundry forge-test pass-rate harness, SolBench/Solidity-eval, or an internal Damn-Vulnerable-DeFi-style CTF suite) so cold-start priors can be replaced by domain-true signal.",
+    "Domain-fit (data-analysis): prefer a DS-specific benchmark (DS-1000, DABench/InfiAgent-DABench, DA-Code, ARCADE, Spider 2.0 / BIRD-SQL) over general SWE-bench/LiveCodeBench when re-rating, since general coding skill is only a proxy for pandas/numpy/SQL/stats wrangling.",
+    "Domain-fit (web-frontend): run all candidates through one frontend-weighted internal eval (React component build + CSS layout + browser-API task) since SWE-bench Verified and AIME/MATH are weak proxies for visual/CSS quality; local outcome-learning should down-weight math benchmarks for this domain.",
+    "Harness fit: confirm each open model's diff/patch-format reliability inside the actual OW patch->git-apply->gate loop (behavioral, not a public benchmark) — apply-failure rate is a first-class router signal the public scores won't capture.",
+    "Cross-cutting: pull a single recent (2026) agentic-coding leaderboard (SWE-bench Verified agentic, Terminal-Bench, or Aider polyglot) listing all ten models head-to-head, since cross-source numbers use different scaffolds and aren't directly comparable.",
+    "Cross-cutting: once local outcome-learning data exists in BestResult.candidates, recalibrate all post_cutoff=true ratings against observed per-Builder green-diff win rates rather than these family-prior seeds."
+  ],
+  "verification": {
+    "date": "2026-06-22",
+    "sources": [
+      "artificialanalysis.ai/models — Artificial Analysis Intelligence Index v4.1 (aggregates GDPval-AA v2, tau3-Banking, Terminal-Bench v2.1, SciCode, HLE, GPQA Diamond, CritPt, AA-Omniscience, AA-LCR; plus Coding & Agentic sub-indices)",
+      "swebench.com — SWE-bench Verified, mini-SWE-agent harness, % Resolved (the agentic-coding signal most relevant to /implement)",
+      "Broad SWE benchmark sweep (6 clusters, 36 benchmarks): SWE-bench Verified/Pro/Multilingual/Multimodal, Terminal-Bench 2.0, GDPval, AA Coding Index, LiveCodeBench, Codeforces/CodeElo, SciCode, EDIT-Bench, BIRD-SQL, WebDev Arena, EvalPlus, RepoBench — see knowledge-base/swe-benchmarks.md"
+    ],
+    "outcome": "Live data found and is current (2026). It materially CORRECTS the knowledge-synthesis cold-start: the open Chinese-lab models were systematically under-rated by the post_cutoff=low-confidence default. See verified_routing.",
+    "version_skew_note": "SWE-bench Verified lists immediate predecessors (Claude Opus 4.5/4.6, GLM-5, Kimi K2.5, DeepSeek V3.2, MiniMax M2.5) vs our pool checkpoints (Opus 4.8, GLM 5.2, Kimi k2.7, DeepSeek V4-Pro, MiniMax M3, Sonnet 4.6). Read predecessor performance as a strong FLOOR for our newer point release.",
+    "signal_quality_note": "SWE-bench Verified is now SATURATED + contamination-suspect (OpenAI deprecated it Feb 2026); prefer contamination-resistant signals — SWE-bench Pro (multi-file, models drop 15-35pts), Terminal-Bench 2.0, GDPval, WebDev Arena. Routing below is anchored on those, not on Verified rank."
+  },
+  "verified_routing": {
+    "intelligence_index_v4_1": {
+      "closed_top": {
+        "claude (Opus 4.8)": 56,
+        "gpt (GPT-5.5 xhigh)": 55,
+        "gpt (GPT-5.5 high)": 53
+      },
+      "open_top": {
+        "glm (GLM-5.2 max)": 51,
+        "minimax (MiniMax-M3)": 44,
+        "deepseek (V4-Pro reasoning max)": 44
+      },
+      "note": "GLM-5.2 is the #1 OPEN-WEIGHT model overall (and it is our Venice e2ee privacy-lane model)."
+    },
+    "swebench_verified_order_top_down": [
+      "opus (Claude 4.5 Opus)",
+      "gemini-3-flash [not in pool]",
+      "minimax (MiniMax M2.5) #3",
+      "opus (Opus 4.6)",
+      "gpt (GPT-5-2 Codex)",
+      "glm (GLM-5) #6",
+      "gpt (GPT-5-2)",
+      "sonnet (Claude 4.5 Sonnet) #8",
+      "kimi (Kimi K2.5) #9",
+      "deepseek (DeepSeek V3.2) #10",
+      "gemini-3-pro [not in pool]",
+      "haiku (Claude 4.5 Haiku) #12",
+      "gpt (GPT-5 Mini)"
+    ],
+    "recommended_tiers": {
+      "architects": [
+        "claude (Opus 4.8 — #2 GDPval, top Verified, multi-source)",
+        "gpt (GPT-5.5 xhigh — #1 Terminal-Bench, #1 AA Coding Index, top BIRD-SQL)",
+        "glm (GLM-5.2 — #3 GDPval, #1 OPEN AA Coding + Terminal-Bench; privacy-capable)"
+      ],
+      "builders_hard_agentic": [
+        "glm (top OSS: TB2 81%, AA Coding 68.8%, GDPval #3, WebDev #2)",
+        "deepseek (V4-Pro: 80.6% Verified / 67.9% TB2 / 76.2% Multilingual)",
+        "minimax (M3 ~80.5% Verified / 66% TB2 — strong but mid-pack on hard boards)",
+        "sonnet (4.6 reliable, but #22 TB2 59.1% — weaker at HARD agentic than its 79.6% Verified implies)"
+      ],
+      "builders_general_everyday": [
+        "sonnet (best patch discipline)",
+        "kimi (K2.6 80.2% / 0.767 Multilingual)",
+        "deepseek",
+        "minimax"
+      ],
+      "builders_repo_completion_edits": [
+        "sonnet (EDIT-Bench Anthropic cluster top)",
+        "glm (top OSS 56.5%)",
+        "kimi",
+        "deepseek"
+      ],
+      "builders_cheap_floor": [
+        "haiku (73.3% Verified / 39.5% std SWE-bench Pro — cleanest sub-frontier Pro number)",
+        "venice-gpt-oss (gpt-oss-120b 62.4% Verified)",
+        "venice-qwen (scaffold-sensitive)"
+      ],
+      "web_frontend": [
+        "glm (WebDev Arena #1 in-pool, Elo 1593 — beats GPT-5.5 & non-thinking Opus)",
+        "sonnet (#2, 1521)",
+        "minimax (#3, 1505)",
+        "gpt (DesignBench #1)"
+      ],
+      "algorithmic_competitive": [
+        "gpt (#1 AA Coding 74.9%, SciCode 56.1%)",
+        "deepseek (V4-Pro #1 LiveCodeBench 0.935 + #1 Codeforces — strongest OPEN algorithmic)",
+        "claude",
+        "glm"
+      ],
+      "sql_data": [
+        "gpt (BIRD-SQL 72.55%, SciCode #1)",
+        "claude (Opus BIRD 70.15%)",
+        "glm",
+        "deepseek"
+      ],
+      "privacy_lane_best": [
+        "venice-glm (GLM-5.2 — #1 OPEN across GDPval/AA-Coding/TB2/WebDev; privacy is NOT a quality tax)",
+        "venice-qwen",
+        "venice-gpt-oss"
+      ]
+    },
+    "key_corrections_vs_coldstart": [
+      "glm: moderate/low -> STRONG. Best open-weight model (Intelligence Index 51) AND strong agentic (GLM-5 #6 SWE-bench Verified). Privacy lane (venice-glm) is now top-quality.",
+      "minimax: moderate/low -> STRONG for agentic/multi-file. MiniMax M2.5 is #3 on SWE-bench Verified, ABOVE GPT-5-2 Codex.",
+      "kimi: moderate/low -> moderate-STRONG agentic (Kimi K2.5 #9 SWE-bench Verified).",
+      "deepseek: moderate -> moderate-strong (V3.2 #10 agentic; V4-Pro Intelligence 44, strong general/math).",
+      "LESSON: defaulting post_cutoff models to low confidence systematically UNDER-rated the open Chinese-lab models — measured data corrects them sharply upward."
+    ],
+    "see_also": "knowledge-base/swe-benchmarks.md (full 36-benchmark survey + models x benchmark matrix)",
+    "refinements_from_broad_sweep": [
+      "GLM-5.2 promoted to #1 hard-agentic Builder (was #2 behind MiniMax) — leads every contamination-resistant agentic board (TB2/Pro/GDPval/WebDev), not just intelligence index.",
+      "New web-frontend slice, GLM-5.2 #1 (WebDev Arena Elo 1593, above GPT-5.5 & non-thinking Opus) — biggest surprise; filled the prior gap.",
+      "Algorithmic/competitive: DeepSeek V4-Pro is the OPEN leader (#1 LiveCodeBench 0.935, #1 Codeforces in-pool).",
+      "MiniMax M3 #3-Verified halo was a predecessor (M2.5) artifact on the saturated bench; mid-pack on TB2/Pro -> keep as strong GENERAL Builder, not the #1 hard pick.",
+      "Sonnet 4.6 is reliable but weaker at HARD agentic than its 79.6% Verified implies (#22 Terminal-Bench 2.0) -> open trio leads the hard-agentic tier.",
+      "Data/SQL now measured (BIRD-SQL + SciCode: gpt > claude > glm > deepseek), not a general-code proxy."
+    ],
+    "gaps_no_public_benchmark": [
+      "smart-contracts / Solidity / Foundry / EVM — NO named public benchmark surfaced; entirely cold-start (stand up a forge-test pass-rate / CTF harness).",
+      "test-generation / issue-repro — SWT-bench froze 2025-04 with zero pool checkpoints.",
+      "multimodal / visual SWE — only stale 2024 baselines."
+    ]
+  },
+  "domains_note": "Per-cell rating/confidence reflect the VERIFIED benchmark routing (the router reads these); smart-contracts left at the lineage cold-start (no public benchmark). See verified_routing + swe-benchmarks.md for the evidence."
+}

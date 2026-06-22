@@ -1,0 +1,49 @@
+# Phase 4 — Lens-diverse adversarial review (Architects ⇄ Builders)
+
+Goal: try to break the Phase-2 winner before it reaches the human. Three Architects review through
+**distinct lenses** so redundancy doesn't blind the panel; objective, serious findings route back to
+the Builders; the rest become PR comments (Phase 3).
+
+Helpers: `skills/implement/scripts/review.py`, `skills/implement/scripts/arch.py`, `execute.run_inner_loop`.
+Input: the materialized winner diff from `execute.run_best_of_n`.
+
+**Reviewer discipline (from superpowers 6.0):** each lens is a **fresh, read-only** reviewer — it must
+not touch the working tree or branch (a reviewer running `git checkout` orphans later commits). Back
+every finding with a **file and line** (`Loc`). The orchestrator does NOT coach a reviewer to skip a
+finding or pre-rate its severity — severity is computed by `review.severity_tag`, not assigned by hand.
+A finding the reviewer cannot confirm from the diff alone (it depends on untouched code) is marked
+`verifiable=False` rather than guessed at.
+
+## Steps
+
+1. **Risk-triage** the winner diff (surface area, touched modules, new I/O).
+2. **Run the three lenses** — each emits `review.Finding(lens, author, title, body, locations=(Loc,...),
+   objective, breaking_test, verifiable)`:
+   - Claude = **spec / correctness** (in-session reasoning).
+   - GPT‑5.5 = **security / edge** via `mcp__codex__codex` (+ `arch.record_orchestrator_reply`).
+   - GLM = **simplicity / dead-code** via `arch.ask(spec, prompt)` (use `spec.lens`).
+
+   Assign **exactly one** lens to write a `breaking_test` (a failing test that demonstrates a real
+   defect). `objective=True` means mechanically checkable, not taste. Set `verifiable=False` on any
+   finding the lens can't confirm from the diff alone.
+3. **Consolidate (order-independent):** `findings = review.dedup(raw)` merges findings at the same
+   location across lenses (and keeps a finding unverifiable if any contributing lens couldn't confirm
+   it); `review.severity_tag` grades each (security+objective+breaking → `blocker`;
+   spec/security+objective → `major`; else `minor`).
+4. **Route / verify / accept:** `rr = review.route_decision(findings)` splits into three buckets:
+   - `rr.routed` (objective blocker/major, **verifiable**) → feed back into `execute.run_inner_loop`
+     **plus** any `breaking_test` as the new oracle delta, then re-review **only the delta**.
+   - `rr.escalated` (**`verifiable=False`** — "can't verify from the diff") → the orchestrator checks
+     these against the untouched code **itself**; do not route them to the Builders unconfirmed.
+   - `rr.advisory` → PR comments (Phase 3).
+   - `rr.decision` is `"route"` if any routed, else `"verify"` if anything escalated (resolve those
+     before accepting), else `"accept"`.
+5. **Re-gate the winner:** `rg = review.re_gate(repo, winner_diff, adapter)` re-applies the winner
+   on a clean baseline and re-runs the gate, rolling back if it isn't green. Refuse a **false green**
+   with `review.junit_executed_count(junit_xml)` — a green with zero executed tests is not green.
+
+**Secrets boundary:** the winner diff + gate stdout are the highest-risk payload — scrub before every
+Architect dispatch. `arch.ask` does this automatically; for the `mcp__codex__codex` security lens you
+MUST `scrub.scrub(text, scrub.env_secrets())` the prompt yourself first (see `references/phase-0.md`).
+
+Never auto-merge — the green, reviewed winner is handed to the human in Phase 5.

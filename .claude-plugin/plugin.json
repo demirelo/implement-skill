@@ -1,0 +1,9 @@
+{
+  "name": "implement",
+  "version": "1.0.0",
+  "description": "Autonomous human-in-the-loop SWE loop: Architects (judgment) and Builders (execution) build a feature end-to-end into a reviewable GitHub draft PR against an objective test oracle, sandboxed, with a self-improving local model router.",
+  "author": { "name": "demirelo" },
+  "homepage": "https://github.com/demirelo/implement-skill",
+  "repository": "https://github.com/demirelo/implement-skill",
+  "keywords": ["skill", "swe-agent", "code-generation", "github-pr", "multi-model", "sandbox", "router"]
+}

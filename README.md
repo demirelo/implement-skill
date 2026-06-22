@@ -1,0 +1,142 @@
+# `/implement` — an autonomous, human-in-the-loop SWE loop
+
+`/implement` builds a feature or fix **end-to-end into a reviewable GitHub PR**. It runs two model
+teams — **Architects** (judgment) and **Builders** (execution) — against an **objective test oracle**,
+inside a sandbox, and leaves the result as a draft PR for a human to merge. It never auto-merges.
+
+It is the software-engineering "door" of a general adversarial-loop engine (`/loop`). The principles:
+a swappable pool of models you own, a router that learns on *your* machine, a hard **test gate**
+instead of model-judged verification, and the human kept at the two decisions that matter. See
+[`docs/design.md`](docs/design.md) for the full design and [`docs/overview.html`](docs/overview.html)
+for a visual one-pager.
+
+> **Status: feature-complete (v1.0).** Every part was adversarially reviewed before landing — 205
+> tests, ruff + mypy clean.
+
+---
+
+## The loop (2 human touchpoints, everything else automated)
+
+```
+0. INTENT        Architects ⇄ human    pin the goal to acceptance criteria; human confirms   ← touchpoint #1
+1. PLAN + TESTS  Architects consensus  vertical-slice DAG + acceptance tests = the ORACLE (immutable)
+2. IMPLEMENT     Builders best-of-N ⇄ sandboxed local gates    inner loop to green; smallest green diff wins
+3. DRAFT PR      push the branch, open a draft pull request
+4. REVIEW        Architects (3 lenses) ⇄ Builders fix    route objective findings back; re-gate the winner
+5. HANDOFF       flip to ready-for-review; 🟢/🟡/🔴 tier + structured body    → HUMAN MERGES   ← touchpoint #2
+```
+
+The Architects **write the acceptance tests; the Builders make them green** — that converts the
+hand-off into an objective oracle, not an opinion. The tests live in the *target repo's own* framework
+(pytest, vitest, `forge test`…) so a green is real, never vacuous.
+
+## The two teams
+
+| Team | Models (default) | Role |
+|---|---|---|
+| **Architects** | Claude Opus · GPT-5.5 (Codex) · GLM-5.2 (Venice) | intent · planning consensus · authoring the acceptance tests · adversarial review |
+| **Builders** | DeepSeek · MiniMax · Kimi · Sonnet/Haiku floor · Venice e2ee lane | implement against the oracle (text-in → diff-out; a deterministic script applies + gates) |
+
+Role-based, not license-based. The loop runs on a **Claude-only floor with zero external keys**, and
+OpenRouter / Venice / Codex keys upgrade the panels. A **privacy lane** (Venice e2ee) keeps a
+confidential repo's code on an end-to-end-encrypted path — and GLM-5.2 there is the *best* open model,
+so privacy is no longer a quality trade-off.
+
+## What makes it safe + smart
+
+- **Sandbox.** The gate runs model-produced code under macOS Seatbelt (default) or Docker:
+  network denied, writes confined to the worktree, host secret dirs (`~/.ssh`, keychain…) read-denied.
+  Safe-by-default — an untrusted repo with no sandbox backend is **refused**.
+- **Guardrails.** Allowlist-first destructive-command gating · git-worktree isolation (never the
+  live tree) · kill criteria + named stop-and-ask · a suitability filter that refuses a run with no
+  oracle.
+- **Learned router.** Each run featurizes the task, ranks Builders by a deterministic
+  Beta-Bernoulli posterior (benchmark **priors** blended with *this machine's* local win-rates + UCB
+  exploration), dispatches the top-k, and logs the outcome — so the **next run is smarter**. Cold-start
+  from public benchmarks (SWE-bench Pro, Terminal-Bench, LiveCodeBench, WebDev Arena…); converges to
+  your measured outcomes. The ledger holds model ids + counts only — never secrets.
+- **Secrets discipline.** A scrubber redacts credentials at every outbound boundary; the dispatch
+  script holds keys (1Password refs / keychain / env / `.env`), models never receive them.
+
+## Getting started (Claude Code)
+
+`/implement` is a Claude Code skill, installable as a plugin.
+
+**1. Prerequisites** — Claude Code, Python 3.11+, `git`, and `gh` (for the PR step). macOS provides the
+Seatbelt sandbox out of the box; on Linux, install Docker for the sandbox.
+
+**2. Install** — in Claude Code:
+
+```
+/plugin marketplace add demirelo/implement-skill
+/plugin install implement
+```
+
+<sub>Manual alternative: `git clone https://github.com/demirelo/implement-skill ~/implement-skill && ln -s ~/implement-skill/skills/implement ~/.claude/skills/implement`</sub>
+
+**3. Use it** — type `/implement` and describe the change:
+
+> `/implement add rate-limiting to the /login endpoint, with tests`
+
+It runs out of the box on a **Claude-only floor** (Opus as Architect, Sonnet/Haiku as Builders) with
+no external keys. The running Claude pins the intent with you, the Architects write the acceptance
+tests, the Builders make them green in a sandbox, and you get a **draft PR to review and merge** —
+asked exactly twice: to confirm the intent, and (by merging) to accept the result.
+
+**4. (Optional) widen the pool** — run the onboarding wizard to add credentials (1Password / OpenRouter
+/ Venice / Codex) and curate the model panels. It stores **non-secret** config in `~/.config/implement/`:
+
+```bash
+python3 skills/implement/scripts/setup.py     # from a clone of the repo
+```
+
+### Or call it directly from Python
+
+```bash
+python3 - <<'PY'
+import sys; sys.path.insert(0, "skills/implement/scripts")
+from implement import run_implement
+best = run_implement("/path/to/your/repo", "add a multiply() helper to mathx.ops")
+print(best.winner, best.applied)
+PY
+```
+
+A repo is **untrusted unless you pass `trusted=True`** — untrusted runs require a sandbox backend.
+
+## Repository layout
+
+| Path | What |
+|---|---|
+| `.claude-plugin/` | the plugin + marketplace manifests (so `/plugin install` works) |
+| `skills/implement/SKILL.md` | the skill front-matter + the loop the running Claude executes |
+| `skills/implement/references/` | phase-by-phase orchestration prose (intent, plan, review, draft-PR, handoff, guardrails, assembler) |
+| `skills/implement/scripts/` | the engine — see below |
+| `knowledge-base/` | `loop-techniques.md` (57 harvested techniques × 12 loop dimensions) + `model-priors.json`/`swe-benchmarks.md` (the router's seed) |
+| `docs/` | `design.md` (the spec) · `overview.html` (visual one-pager) · `superpowers/{specs,plans}/` (design docs + implementation plans) |
+| `tests/` | 205 offline unit tests (a fixture repo under `tests/fixtures/`) |
+
+The `skills/implement/scripts/` engine, by responsibility:
+
+| Area | Scripts |
+|---|---|
+| Inner loop + gate | `execute.py`, `gate.py` (+ `adapters/`) |
+| Architect phases | `arch.py`, `intent.py`, `plan.py`, `oracle.py`, `review.py` |
+| GitHub PR | `gh.py`, `handoff.py`, `publish.py` |
+| Guardrails | `sandbox.py`, `guard.py`, `workspace.py`, `kill.py`, `suitability.py` |
+| Learned router | `features.py`, `outcomes.py`, `router.py`, `kb.py` |
+| Dispatch · credentials · config | `backends.py`, `resolvers.py`, `scrub.py`, `preflight.py`, `seed.py`, `panel.py` |
+
+## Testing
+
+```bash
+python3 -m pytest -q          # 205 tests, offline (no network, no live models)
+ruff check . && mypy skills/implement/scripts
+```
+
+The harness was dogfooded on its own construction, and every component passed a multi-lens adversarial
+review before landing.
+
+---
+
+*Built with Claude. The design principle throughout: route every claim through an objective gate, keep
+the human at the two touchpoints that matter, and let the loop get smarter the more it's used.*
