@@ -11,7 +11,8 @@ Precondition: `intent.assert_spendable(ac)` passes (Phase 0 confirmed).
 
 1. Each Architect proposes slices → `plan.Proposal(architect, slices=[plan.Slice(id, title, rationale,
    deps, criteria_refs)], notes)`. Dispatch script specs via `arch.ask(spec, prompt, as_json=True)`;
-   the GPT‑5.5 spec via `mcp__codex__codex` + `arch.record_orchestrator_reply("gpt", reply, as_json=True)`.
+   the GPT‑5.5 spec via `mcp__codex__codex` (always `model: "gpt-5.5"`, `config: {"model_reasoning_effort":
+   "xhigh"}`) + `arch.record_orchestrator_reply("gpt", reply, as_json=True)`.
    Each slice's `criteria_refs` names the Phase-0 `Criterion` ids it satisfies.
 2. `cruxes = plan.find_cruxes(proposals)` — only **material** disagreements (a slice some Architects
    include and another omits) become cruxes; cosmetic/ordering differences collapse. Deliberate each

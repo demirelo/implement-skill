@@ -20,7 +20,8 @@ A finding the reviewer cannot confirm from the diff alone (it depends on untouch
 2. **Run the three lenses** — each emits `review.Finding(lens, author, title, body, locations=(Loc,...),
    objective, breaking_test, verifiable)`:
    - Claude = **spec / correctness** (in-session reasoning).
-   - GPT‑5.5 = **security / edge** via `mcp__codex__codex` (+ `arch.record_orchestrator_reply`).
+   - GPT‑5.5 = **security / edge** via `mcp__codex__codex` (always `model: "gpt-5.5"`,
+     `config: {"model_reasoning_effort": "xhigh"}`) (+ `arch.record_orchestrator_reply`).
    - GLM = **simplicity / dead-code** via `arch.ask(spec, prompt)` (use `spec.lens`).
 
    Assign **exactly one** lens to write a `breaking_test` (a failing test that demonstrates a real

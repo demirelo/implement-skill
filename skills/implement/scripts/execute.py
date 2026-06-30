@@ -26,6 +26,10 @@ class LoopResult:
     diff: str = ""
     last_output: str = ""
     error: str = ""
+    # per-turn record of attempts that were applied-then-reverted (or failed to apply). Already
+    # scrubbed at capture time (see run_inner_loop). This is the tried-and-reverted decision trace —
+    # without it only the final error survives and the "road to the diff" is lost.
+    ledger: list = field(default_factory=list)
 
 
 def _copy_repo(repo_path) -> str:
@@ -96,7 +100,7 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
         else:
             gate_result = run_gate(repo_path, adapter, wrap=wrap)
             if gate_result.passed and gate_result.passing_count > 0:   # H5 again on the winning turn
-                return LoopResult(success=True, turns=turn, diff=diff)
+                return LoopResult(success=True, turns=turn, diff=diff, ledger=list(ledger))
             _reset(repo_path)  # fully revert the failed attempt — tracked AND untracked files
             ledger.append(scrub(f"turn {turn}: still failing {gate_result.failing_tests}", secrets))
             turns_log.append({"failing": list(gate_result.failing_tests), "applied": True,
@@ -105,9 +109,10 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
         if crit is not None:   # kill criteria / stop-and-ask (GUTTER/THREE_STRIKE/DENIAL beyond the cap)
             decision = kill.should_stop(turns_log, crit)
             if decision.stop and decision.blocker_type != "CAP_REACHED":
-                return LoopResult(success=False, turns=turn,
+                return LoopResult(success=False, turns=turn, ledger=list(ledger),
                                   error=f"stop-and-ask {decision.blocker_type}: {decision.reason}")
-    return LoopResult(success=False, turns=max_turns, last_output=scrub(gate_result.stdout, secrets))
+    return LoopResult(success=False, turns=max_turns, ledger=list(ledger),
+                      last_output=scrub(gate_result.stdout, secrets))
 
 
 @dataclass
@@ -143,6 +148,29 @@ def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secr
     applied = apply_patch(repo_path, won.diff).ok  # materialize the RAW winner diff (scrubbing it would corrupt code)
     return BestResult(winner=winner, diff=scrub(won.diff, secrets), turns=won.turns,  # report a redacted copy
                       applied=applied, candidates=candidates)
+
+
+def decision_trace(best: BestResult) -> dict:
+    """Render-ready competition summary for the Phase-5 handoff. Pure: reads candidate LoopResults to
+    surface the road to the winning diff — every competitor, why each stopped, the winner's diff-size
+    margin over the runner-up, and each tried-and-reverted approach — not just the final diff. Each
+    candidate's `reverted` ledger was already scrubbed at capture time in run_inner_loop."""
+    candidates, green_sizes = [], {}
+    for name, r in best.candidates.items():
+        size = _diff_size(r.diff)
+        if r.success:
+            why, green_sizes[name] = f"green at turn {r.turns}", size
+        else:
+            why = r.error or f"exhausted {r.turns} turns without green"
+        candidates.append({"name": name, "status": "green" if r.success else "failed",
+                           "turns": r.turns, "diff_size": size, "why_stopped": why,
+                           "winner": bool(best.winner) and name == best.winner,
+                           "reverted": list(r.ledger)})
+    winner = best.winner or ""
+    winner_size = green_sizes.get(winner) if winner else None
+    runners_up = [s for n, s in green_sizes.items() if n != winner]
+    margin = (min(runners_up) - winner_size) if (winner_size is not None and runners_up) else None
+    return {"winner": winner, "margin": margin, "winner_size": winner_size, "candidates": candidates}
 
 
 _DISPATCH = Path(__file__).parent / "team_dispatch.py"

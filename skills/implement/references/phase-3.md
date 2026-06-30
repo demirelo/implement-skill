@@ -10,9 +10,11 @@ re-gate result.
 ## Steps
 
 1. Assemble `publish.RunArtifacts(goal, branch, title, consensus_notes, acceptance_k, acceptance_n,
-   review, regate_passed)`. The `branch` is derived from the slice/goal — `gh.commit_and_push`
-   validates it (safe ref chars, no leading dash), so a malformed/crafted name fails loud rather than
-   injecting a git/gh flag.
+   review, regate_passed, trace=execute.decision_trace(best))`. The `branch` is derived from the
+   slice/goal — `gh.commit_and_push` validates it (safe ref chars, no leading dash), so a
+   malformed/crafted name fails loud rather than injecting a git/gh flag. `trace` (from the Phase-2
+   `best` BestResult) is the competition summary — competitors, winner + diff-size margin, per-candidate
+   why-stopped, tried-and-reverted approaches — rendered into the body the reviewer reads in Phase 5.
 2. `pr = publish.open_draft(repo, artifacts)` — commits the materialized winner, pushes the branch,
    and opens a **draft** PR (`gh pr create --draft`), returning a `gh.PrRef(number, url, branch)`.
 

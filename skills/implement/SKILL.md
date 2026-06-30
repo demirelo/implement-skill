@@ -37,6 +37,10 @@ See `references/onboarding.md`.
 seed config), preflights the panels, and drives the live Builder panel through the v1 best-of-N loop.
 A confidential repo runs with `privacy=True` (Venice/e2ee lane only).
 
+**Codex/ChatGPT invariant (always):** every `mcp__codex__codex` call — the GPT Architect, in every
+phase — MUST pass `model: "gpt-5.5"` and `config: {"model_reasoning_effort": "xhigh"}`. Never use any
+other model or a lower effort on the Codex/ChatGPT path.
+
 ## References
 - `references/phase-0.md` — intent dialogue + the no-spend-before-confirm gate (touchpoint #1).
 - `references/phase-1.md` — plan consensus + the RED, cross-reviewed, immutable acceptance-test oracle.

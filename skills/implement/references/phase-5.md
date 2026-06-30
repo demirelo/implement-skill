@@ -10,8 +10,10 @@ findings checked by the orchestrator.
 ## Steps
 
 1. `label = publish.finalize(repo, pr, artifacts)` — computes the tier, writes the structured PR body
-   (goal · plan + consensus · k/N acceptance · review summary · decisions/blocked/risks), posts the
-   curated `render_review_comment` as a comment, and flips the PR to ready-for-review.
+   (goal · plan + consensus · k/N acceptance · review summary · decisions/blocked/risks · **decision
+   trace**: which Builders competed, the winner + its diff-size margin, why each stopped, and the
+   tried-and-reverted approaches), posts the curated `render_review_comment` as a comment, and flips
+   the PR to ready-for-review. The trace lets the merging human see the road to the diff, not just the diff.
 2. The tier (`handoff.tier`): **🔴** if acceptance isn't green / the winner didn't re-gate / a blocking
    finding is still routed; **🟡** if there are escalated can't-verify findings a human must check;
    **🟢** otherwise (advisory-only is still green). `0/0` acceptance is treated as **not** green (a

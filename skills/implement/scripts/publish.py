@@ -24,6 +24,7 @@ class RunArtifacts:
     acceptance_n: int
     review: object
     regate_passed: bool
+    trace: object = None   # execute.decision_trace output; rendered into the body, scrubbed on the way out
 
 
 def _secrets(secrets):
@@ -46,7 +47,7 @@ def finalize(repo, pr, artifacts, *, secrets=None, runner=subprocess.run) -> str
                  regate_passed=artifacts.regate_passed, review=artifacts.review)
     body = scrub(render_pr_body(goal=artifacts.goal, consensus_notes=artifacts.consensus_notes,
                                 acceptance_k=artifacts.acceptance_k, acceptance_n=artifacts.acceptance_n,
-                                review=artifacts.review, tier_label=label), sec)
+                                review=artifacts.review, tier_label=label, trace=artifacts.trace), sec)
     update_body(repo, pr, body, runner=runner)
     post_comment(repo, pr, scrub(render_review_comment(artifacts.review), sec), runner=runner)
     mark_ready(repo, pr, runner=runner)

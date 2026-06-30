@@ -84,6 +84,70 @@ VERBOSE_FIX = (
 )
 
 
+def test_loop_result_captures_revert_ledger():
+    # C1: the per-turn ledger run_inner_loop builds must survive into LoopResult
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    calls = []
+
+    def flaky(prompt):
+        calls.append(prompt)
+        return NOOP_PATCH if len(calls) == 1 else MULTIPLY_FIX
+
+    result = run_inner_loop(work, "add multiply()", adapter, flaky, max_turns=3)
+    assert result.success is True
+    assert len(result.ledger) == 1                                  # exactly the one reverted attempt
+    assert "still failing" in result.ledger[0]                      # and it records what was reverted
+
+
+def test_best_of_n_preserves_candidate_ledgers():
+    # C2: each candidate's revert ledger is reachable via BestResult.candidates
+    from execute import run_best_of_n
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    dispatchers = {
+        "wrong": lambda p: NOOP_PATCH,     # never fixes -> reverts every turn
+        "min": lambda p: MULTIPLY_FIX,     # wins turn 1, reverts nothing
+    }
+    best = run_best_of_n(work, "add multiply()", adapter, dispatchers, max_turns=2)
+    assert best.winner == "min"
+    assert best.candidates["wrong"].ledger          # the failing candidate's attempts are kept
+    assert best.candidates["min"].ledger == []      # the clean winner reverted nothing
+
+
+def test_decision_trace_summarizes_competition():
+    # C3 (data side): decision_trace turns a BestResult into a render-ready summary
+    from execute import run_best_of_n, decision_trace
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    dispatchers = {
+        "verbose": lambda p: VERBOSE_FIX,   # green, larger diff
+        "min": lambda p: MULTIPLY_FIX,      # green, smallest diff -> winner
+        "wrong": lambda p: NOOP_PATCH,      # never green
+    }
+    best = run_best_of_n(work, "add multiply()", adapter, dispatchers, max_turns=2)
+    t = decision_trace(best)
+    assert t["winner"] == "min"
+    assert {c["name"] for c in t["candidates"]} == {"verbose", "min", "wrong"}   # all competitors
+    win = next(c for c in t["candidates"] if c["name"] == "min")
+    assert win["winner"] is True and win["status"] == "green"
+    assert t["margin"] == 1 and t["winner_size"] == 4   # MULTIPLY_FIX (4) vs VERBOSE_FIX (5)
+    lose = next(c for c in t["candidates"] if c["name"] == "wrong")
+    assert lose["status"] == "failed" and lose["reverted"]   # the loser's tried-and-reverted survives
+
+
+def test_decision_trace_no_green_winner():
+    # C4 (data side): all candidates fail -> no winner, no margin, competitors still listed
+    from execute import run_best_of_n, decision_trace
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    best = run_best_of_n(work, "add multiply()", adapter, {"a": lambda p: NOOP_PATCH}, max_turns=2)
+    t = decision_trace(best)
+    assert t["winner"] == "" and t["margin"] is None and t["winner_size"] is None
+    assert [c["name"] for c in t["candidates"]] == ["a"]
+    assert all(c["winner"] is False for c in t["candidates"])
+
+
 def test_best_of_n_picks_smallest_green_and_materializes_it():
     from execute import run_best_of_n
     work = _copy_repo(FIXTURE)

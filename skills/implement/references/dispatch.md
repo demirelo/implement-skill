@@ -2,7 +2,7 @@
 
 ## Architects (judgment: intent, plan, tests, review)
 - **claude** — the orchestrator itself + `Task` subagents (this process).
-- **gpt** — `mcp__codex__codex`, reasoning effort `xhigh`.
+- **gpt** — `mcp__codex__codex`, **always** `model: "gpt-5.5"` + `config: {"model_reasoning_effort": "xhigh"}`. No other model/effort on the Codex/ChatGPT path.
 - **glm** — `team_dispatch.py --provider glm --route direct --effort high` (Venice e2ee).
 
 ## Builders (execution)

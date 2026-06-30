@@ -16,7 +16,8 @@ Helpers: `skills/implement/scripts/intent.py`, `skills/implement/scripts/arch.py
 2. **Convene the Architect panel.** `panel = arch.arch_panel(profile, env=...)`. For each `ArchSpec`:
    - `spec.mode == "script"` → `arch.ask(spec, prompt)` (Claude headless, GLM/Venice).
    - `spec.mode == "orchestrator"` (codex_mcp / GPT‑5.5) → **you** call `mcp__codex__codex` with the
-     prompt, then wrap the reply with `arch.record_orchestrator_reply("gpt", reply)`. `arch.ask`
+     prompt — **always** `model: "gpt-5.5"`, `config: {"model_reasoning_effort": "xhigh"}` (carried on
+     `spec.entry`) — then wrap the reply with `arch.record_orchestrator_reply("gpt", reply)`. `arch.ask`
      deliberately raises `OrchestratorOnly` for these — the boundary is structural.
 
    Ask the panel to surface the goal's cruxes (ambiguities, hidden boundaries, error cases, non-goals).

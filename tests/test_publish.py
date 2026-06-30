@@ -65,6 +65,40 @@ def test_finalize_scrubs_body_and_comment():
     assert SECRET not in sent and "***" in sent
 
 
+def _trace(**over):
+    base = dict(winner="min", margin=None, winner_size=4,
+                candidates=[{"name": "min", "status": "green", "turns": 1, "diff_size": 4,
+                             "why_stopped": "green at turn 1", "winner": True, "reverted": []}])
+    base.update(over)
+    return base
+
+
+def test_finalize_threads_trace_into_body():
+    # C5: finalize renders RunArtifacts.trace into the PR body via render_pr_body
+    fake = FakeRun()
+    art = _artifacts(trace=_trace())
+    ref = open_draft("/repo", art, sign=False, runner=fake)
+    fake.calls.clear()
+    finalize("/repo", ref, art, runner=fake)
+    edit_stdin = [stdin for argv, stdin in fake.calls if argv[:3] == ["gh", "pr", "edit"]][0]
+    assert "Decision trace" in edit_stdin and "min" in edit_stdin
+
+
+def test_finalize_scrubs_secret_in_trace():
+    # C6: a secret embedded in a candidate's raw why-stopped is redacted by the publish scrub boundary
+    fake = FakeRun()
+    trace = _trace(winner="", margin=None, winner_size=None,
+                   candidates=[{"name": "x", "status": "failed", "turns": 0, "diff_size": 0,
+                                "why_stopped": f"DispatchError: leaked {SECRET}", "winner": False,
+                                "reverted": [f"turn 1: {SECRET}"]}])
+    art = _artifacts(trace=trace, acceptance_k=0, acceptance_n=0)
+    ref = open_draft("/repo", art, sign=False, runner=fake)
+    fake.calls.clear()
+    finalize("/repo", ref, art, runner=fake)
+    sent = "".join(stdin or "" for _, stdin in fake.calls)
+    assert SECRET not in sent and "***" in sent
+
+
 def test_finalize_zero_acceptance_is_not_green():
     fake = FakeRun()
     art = _artifacts(acceptance_k=0, acceptance_n=0)
