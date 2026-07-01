@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""team-dispatch.py — call any one worker on the /solve panel, reliably.
+"""team-dispatch.py — call any one worker on the Implement Builder panel, reliably.
 
 Hardened successor to solve-worker.py. The key difference: it CAPS reasoning effort
 (`reasoning: {effort}` for OpenRouter, or max_tokens budgeting) so reasoning models
@@ -9,9 +9,9 @@ the #1 failure mode of the raw script. Also prints token usage + $ cost to stder
 
 Prompt on stdin. Worker text on stdout. Usage/cost on stderr.
 
-  echo "$PROMPT" | python3 team-dispatch.py --provider deepseek
-  echo "$PROMPT" | python3 team-dispatch.py --provider kimi   --route openrouter --effort medium
-  echo "$PROMPT" | python3 team-dispatch.py --provider glm    --route direct   # Venice e2ee (confidential)
+  echo "$PROMPT" | python3 team-dispatch.py --provider deepseek --route direct
+  echo "$PROMPT" | python3 team-dispatch.py --provider kimi     --route openrouter --effort medium
+  echo "$PROMPT" | python3 team-dispatch.py --provider glm      --route direct   # Venice e2ee (confidential)
 
 Providers: deepseek | minimax | kimi | glm   (+ openrouter as a raw passthrough)
 Routes:    openrouter (default, reliable, capped reasoning)  |  direct (provider's own API)
@@ -29,6 +29,31 @@ PANEL = {
     "glm":      ("z-ai/glm-5.2",              "venice",   1.200, 4.100),
 }
 
+ENV_KEYS = {
+    "openrouter": ("OPENROUTER_API_KEY",),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "minimax": ("MINIMAX_API_KEY",),
+    "kimi": ("KIMI_API_KEY", "MOONSHOT_API_KEY"),
+    "venice": ("VENICE_API_KEY",),
+}
+
+
+class TransientHTTPError(RuntimeError):
+    pass
+
+
+class FatalHTTPError(RuntimeError):
+    pass
+
+
+def env_read(provider):
+    for name in ENV_KEYS.get(provider, ()):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return ""
+
+
 def op_read(ref, account):
     argv = ["op", "read", ref]
     if account and "OP_SERVICE_ACCOUNT_TOKEN" not in os.environ:
@@ -38,8 +63,31 @@ def op_read(ref, account):
         sys.exit(f"team-dispatch: op read failed ({r.stderr.strip()}). Unlock 1Password, or export OP_SERVICE_ACCOUNT_TOKEN for unattended runs.")
     return r.stdout.strip()
 
+
+def maybe_resolve_key(provider, cfg):
+    key = env_read(provider)
+    if key:
+        return key
+    ref = cfg.get("key_ref")
+    if ref and "<" not in ref and ">" not in ref:
+        return op_read(ref, cfg.get("account"))
+    return ""
+
+
+def resolve_key(provider, cfg):
+    key = maybe_resolve_key(provider, cfg)
+    if key:
+        return key
+    env_names = ", ".join(ENV_KEYS.get(provider, ())) or f"{provider.upper()}_API_KEY"
+    sys.exit(
+        f"team-dispatch: no credential for {provider}. "
+        f"Export one of [{env_names}] or configure a real 1Password key_ref in providers.json."
+    )
+
+
 def post(url, body, headers, timeout):
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
+    last_transient = ""
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -47,12 +95,39 @@ def post(url, body, headers, timeout):
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:400]
             if e.code == 429 or 500 <= e.code < 600:
+                last_transient = f"HTTP {e.code}: {detail}"
                 print(f"team-dispatch: HTTP {e.code}, retry {attempt+1}/3: {detail}", file=sys.stderr)
                 time.sleep(2*(attempt+1)); continue
-            sys.exit(f"team-dispatch: HTTP {e.code}: {detail}")
+            raise FatalHTTPError(f"HTTP {e.code}: {detail}")
         except urllib.error.URLError as e:
+            last_transient = str(e.reason)
             print(f"team-dispatch: {e.reason}, retry {attempt+1}/3", file=sys.stderr); time.sleep(2*(attempt+1))
-    sys.exit("team-dispatch: failed after 3 attempts")
+    raise TransientHTTPError(last_transient or "failed after 3 attempts")
+
+
+def openrouter_request(model, msgs, max_tokens, temperature, effort, timeout):
+    oc = CFG["openrouter"]
+    url = oc["base_url"].rstrip("/") + "/chat/completions"
+    body = {"model": model, "messages": msgs, "stream": False,
+            "max_tokens": max_tokens, "temperature": temperature, "usage": {"include": True}}
+    if effort != "none":
+        body["reasoning"] = {"effort": effort}
+    key = resolve_key("openrouter", oc)
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+               "HTTP-Referer": "https://localhost/implement", "X-Title": "implement"}
+    return post(url, body, headers, timeout)
+
+
+def direct_request(direct_key, model, msgs, max_tokens, temperature, timeout):
+    dc = CFG[direct_key]
+    url = dc["base_url"].rstrip("/") + "/chat/completions"
+    body = {"model": model or dc["model"], "messages": msgs, "stream": False,
+            "max_tokens": max_tokens, "temperature": temperature}
+    body.update(dc.get("extra_body", {}))
+    key = resolve_key(direct_key, dc)
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    headers.update(dc.get("extra_headers", {}))
+    return post(url, body, headers, timeout)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -77,25 +152,22 @@ def main():
     msgs = ([{"role":"system","content":a.system}] if a.system else []) + [{"role":"user","content":prompt}]
 
     if a.route == "openrouter":
-        oc = CFG["openrouter"]
-        url = oc["base_url"].rstrip("/") + "/chat/completions"
-        body = {"model": a.model or slug, "messages": msgs, "stream": False,
-                "max_tokens": a.max_tokens, "temperature": a.temperature, "usage": {"include": True}}
-        if a.effort != "none": body["reasoning"] = {"effort": a.effort}   # <-- the critical fix
-        key = op_read(oc["key_ref"], oc["account"])
-        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
-                   "HTTP-Referer":"https://localhost/solve", "X-Title":"solve-team"}
+        data = openrouter_request(a.model or slug, msgs, a.max_tokens, a.temperature, a.effort, a.timeout)
     else:  # direct provider API
-        dc = CFG[direct_key]
-        url = dc["base_url"].rstrip("/") + "/chat/completions"
-        body = {"model": a.model or dc["model"], "messages": msgs, "stream": False,
-                "max_tokens": a.max_tokens, "temperature": a.temperature}
-        body.update(dc.get("extra_body", {}))
-        key = op_read(dc["key_ref"], dc["account"])
-        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        headers.update(dc.get("extra_headers", {}))
-
-    data = post(url, body, headers, a.timeout)
+        try:
+            data = direct_request(direct_key, a.model, msgs, a.max_tokens, a.temperature, a.timeout)
+        except TransientHTTPError as exc:
+            fallback = CFG.get(direct_key, {}).get("fallback")
+            if not fallback or not maybe_resolve_key("openrouter", CFG["openrouter"]):
+                raise
+            print(
+                f"team-dispatch: direct {direct_key} transient failure ({exc}); "
+                f"falling back to OpenRouter {fallback['model']}",
+                file=sys.stderr,
+            )
+            data = openrouter_request(
+                fallback["model"], msgs, a.max_tokens, a.temperature, a.effort, a.timeout
+            )
     try:
         txt = data["choices"][0]["message"].get("content") or ""
     except (KeyError, IndexError, TypeError):
@@ -110,4 +182,7 @@ def main():
     print(txt)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (TransientHTTPError, FatalHTTPError) as exc:
+        sys.exit(f"team-dispatch: {exc}")

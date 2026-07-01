@@ -11,8 +11,10 @@ MULTIPLY_FIX = (
 )
 
 
-def test_run_implement_drives_fixture_green_with_injected_profile(tmp_path):
+def test_run_implement_drives_fixture_green_with_injected_profile(tmp_path, monkeypatch):
     from execute import _copy_repo
+    import implement
+    monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
     work = _copy_repo(FIXTURE)
     led = str(tmp_path / "led.jsonl")
     profile = {
@@ -51,10 +53,12 @@ def test_run_implement_raises_when_no_live_builder():
         run_implement(_copy_repo(FIXTURE), "x", profile=profile, runner=None, max_turns=1)
 
 
-def test_run_implement_privacy_promotes_private_architect(tmp_path):
+def test_run_implement_privacy_promotes_private_architect(tmp_path, monkeypatch):
     # glm is a private Architect and there is no private Builder; under privacy it must be
     # promoted to build, or the private lane can never run.
     from execute import _copy_repo
+    import implement
+    monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
     work = _copy_repo(FIXTURE)
     profile = {
         "pool": {"glm": {"backend": "team_dispatch", "provider": "glm", "route": "direct",
@@ -78,10 +82,12 @@ def test_run_implement_privacy_promotes_private_architect(tmp_path):
     assert best.applied is True
 
 
-def test_run_implement_floor_skips_non_dispatchable_architect(tmp_path):
+def test_run_implement_floor_skips_non_dispatchable_architect(tmp_path, monkeypatch):
     # no live Builder; a codex_mcp architect (gpt) precedes a claude_headless one. The floor must
     # SKIP the non-dispatchable gpt and promote claude, not crash with UnsupportedBackend.
     from execute import _copy_repo
+    import implement
+    monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
     work = _copy_repo(FIXTURE)
     profile = {
         "pool": {"gpt": {"backend": "codex_mcp", "model": "gpt-5.5", "data": "standard"},

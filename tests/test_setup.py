@@ -1,7 +1,12 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
-from setup import interactive_setup, credential_source
+from setup import (
+    credential_source,
+    detect_env_credentials,
+    interactive_setup,
+    profile_for_credentials,
+)
 
 
 def test_credential_source_env():
@@ -56,3 +61,43 @@ def test_interactive_setup_drops_probe_failures():
     profile = interactive_setup(input_fn=lambda _p: "", getpass_fn=lambda _p: "",
                                 runner=_DeadProbe(), env={})
     assert profile["panels"]["builders"] == []   # claude_headless Builders failed the 1-token probe
+
+
+def test_detect_env_credentials_prefers_known_provider_vars():
+    creds = detect_env_credentials({"DEEPSEEK_API_KEY": "sk-ds", "MINIMAX_API_KEY": "sk-mm"})
+    assert creds == {
+        "deepseek": {"source": "env", "var": "DEEPSEEK_API_KEY"},
+        "minimax": {"source": "env", "var": "MINIMAX_API_KEY"},
+    }
+
+
+def test_profile_for_credentials_routes_direct_provider_env_keys():
+    base = {
+        "pool": {
+            "deepseek": {
+                "backend": "team_dispatch",
+                "provider": "deepseek",
+                "route": "openrouter",
+                "cred_provider": "openrouter",
+            }
+        },
+        "credentials": {},
+    }
+    profile = profile_for_credentials(
+        base, {"deepseek": {"source": "env", "var": "DEEPSEEK_API_KEY"}}
+    )
+    assert profile["pool"]["deepseek"]["route"] == "direct"
+    assert profile["pool"]["deepseek"]["cred_provider"] == "deepseek"
+
+
+def test_interactive_setup_auto_detects_env_credentials():
+    profile = interactive_setup(
+        input_fn=lambda _p: "",
+        getpass_fn=lambda _p: "",
+        runner=_AlwaysLiveRunner(),
+        env={"DEEPSEEK_API_KEY": "sk-ds", "MINIMAX_API_KEY": "sk-mm"},
+    )
+    assert profile["credentials"]["deepseek"] == {"source": "env", "var": "DEEPSEEK_API_KEY"}
+    assert profile["credentials"]["minimax"] == {"source": "env", "var": "MINIMAX_API_KEY"}
+    assert profile["pool"]["deepseek"]["route"] == "direct"
+    assert "deepseek" in profile["panels"]["builders"]

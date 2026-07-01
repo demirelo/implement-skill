@@ -32,6 +32,11 @@ probes each with a 1-token check, and stores the model pool + Architects/Builder
 (Opus Architect, Sonnet/Haiku Builders); OpenRouter/Venice/Codex keys upgrade the panels.
 See `references/onboarding.md`.
 
+Codex note: this same folder is a native Codex skill. Use `scripts/smoke.py` for an offline harness
+check, and `scripts/smoke.py --live` when you explicitly want to call configured external Builders.
+`team_dispatch.py` reads `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`/`MOONSHOT_API_KEY`,
+`OPENROUTER_API_KEY`, and `VENICE_API_KEY` before falling back to 1Password.
+
 ## Running
 `implement.run_implement(repo, task)` loads the stored profile (or `seed.default_profile` from the
 seed config), preflights the panels, and drives the live Builder panel through the v1 best-of-N loop.

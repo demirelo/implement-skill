@@ -9,7 +9,7 @@ addopts = "--ignore=tests/fixtures"
 
 [tool.ruff]
 line-length = 100
-extend-exclude = ["skills/implement/scripts/team_dispatch.py"]
+extend-exclude = ["skills/implement/scripts/team_dispatch.py", "skills/solve/scripts"]
 
 [tool.mypy]
 ignore_missing_imports = true

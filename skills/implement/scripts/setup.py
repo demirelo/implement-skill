@@ -18,6 +18,14 @@ _MODELS = json.loads((_HERE / "models.json").read_text())
 _PROVIDERS = json.loads((_HERE / "providers.json").read_text())
 
 _METHODS = ("op", "env", "dotenv", "keychain")
+_ENV_DEFAULTS = {
+    "openrouter": ("OPENROUTER_API_KEY",),
+    "venice": ("VENICE_API_KEY",),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "minimax": ("MINIMAX_API_KEY",),
+    "kimi": ("KIMI_API_KEY", "MOONSHOT_API_KEY"),
+}
+_DIRECT_ENV_PROVIDERS = {"deepseek", "minimax", "kimi", "venice"}
 
 
 def credential_source(provider: str, method: str, input_fn, getpass_fn=None,
@@ -42,10 +50,39 @@ def credential_source(provider: str, method: str, input_fn, getpass_fn=None,
     raise ValueError(f"unknown method {method!r}")
 
 
+def detect_env_credentials(env=None) -> dict:
+    """Return non-secret env credential declarations for recognized provider API keys."""
+    env = os.environ if env is None else env
+    creds = {}
+    for provider, names in _ENV_DEFAULTS.items():
+        for name in names:
+            if env.get(name):
+                creds[provider] = {"source": "env", "var": name}
+                break
+    return creds
+
+
+def profile_for_credentials(base: dict, creds: dict) -> dict:
+    """Attach credentials and route direct-provider env keys to direct APIs."""
+    profile = dict(base)
+    profile["credentials"] = dict(creds)
+    pool = {model: dict(entry) for model, entry in base.get("pool", {}).items()}
+    for model, entry in pool.items():
+        provider = entry.get("provider")
+        if provider in _DIRECT_ENV_PROVIDERS and provider in creds:
+            entry["route"] = "direct"
+            entry["cred_provider"] = provider
+        pool[model] = entry
+    profile["pool"] = pool
+    return profile
+
+
 def interactive_setup(input_fn=input, getpass_fn=None, runner=subprocess.run, env=None) -> dict:
     env = os.environ if env is None else env
     base = default_profile(_MODELS, _PROVIDERS)
-    creds: dict = {}
+    creds: dict = detect_env_credentials(env)
+    if creds:
+        print(f"Detected env credentials for: {sorted(creds)}")
     print("Configure external providers (blank to stop). Venice = privacy lane (e2ee).")
     while True:
         provider = input_fn(
@@ -62,8 +99,9 @@ def interactive_setup(input_fn=input, getpass_fn=None, runner=subprocess.run, en
         if cred is None:
             print(f"  WARNING: {provider} did not resolve yet — recorded anyway")
         creds[provider] = {k: v for k, v in src.items() if not k.startswith("_")}
+    profile = profile_for_credentials(base, creds)
     # available = pool models whose backend is free OR whose cred_provider/provider is in creds
-    pool = base["pool"]
+    pool = profile["pool"]
     available: set = set()
     for mid, entry in pool.items():
         if entry.get("backend") in ("claude_headless", "codex_mcp"):
@@ -74,9 +112,7 @@ def interactive_setup(input_fn=input, getpass_fn=None, runner=subprocess.run, en
     accept = input_fn(f"Proposed panels {panels} — accept? [Y/n]: ").strip().lower()
     if accept == "n":
         print("  (edit ~/.config/implement/config.json to customize)")
-    profile = dict(base)
     profile["panels"] = panels
-    profile["credentials"] = creds
     # 1-token liveness probe per panel member; drop the ones that fail so a present-but-dead
     # key surfaces at setup, not mid-loop (spec §4).
     rows = {r.model: r.live for r in readiness(profile, env=env, runner=runner, probe=True)}

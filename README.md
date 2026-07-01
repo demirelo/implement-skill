@@ -10,8 +10,8 @@ instead of model-judged verification, and the human kept at the two decisions th
 [`docs/design.md`](docs/design.md) for the full design and [`docs/overview.html`](docs/overview.html)
 for a visual one-pager.
 
-> **Status: feature-complete (v1.0).** Every part was adversarially reviewed before landing — 205
-> tests, ruff + mypy clean.
+> **Status: feature-complete (v1.0).** Every part was adversarially reviewed before landing —
+> offline tests, ruff + mypy clean.
 
 ---
 
@@ -90,6 +90,29 @@ asked exactly twice: to confirm the intent, and (by merging) to accept the resul
 python3 skills/implement/scripts/setup.py     # from a clone of the repo
 ```
 
+## Getting started (Codex)
+
+The same `skills/implement/` folder is also a native Codex skill. Install it into your Codex skills
+directory, or keep a symlink to this repository's `skills/implement` folder, then invoke `$implement`
+from Codex.
+
+Recommended Codex setup:
+
+```bash
+python3 skills/implement/scripts/setup.py
+python3 skills/implement/scripts/smoke.py          # offline harness check
+python3 skills/implement/scripts/smoke.py --live   # optional: calls configured external Builders
+```
+
+The setup wizard auto-detects these env var credentials and stores only their variable names, never
+secret values: `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`/`MOONSHOT_API_KEY`,
+`OPENROUTER_API_KEY`, and `VENICE_API_KEY`. When DeepSeek or MiniMax env keys are present, setup
+routes those Builders directly to their provider APIs so Codex runs do not fall into placeholder
+1Password/OpenRouter config.
+
+Codex can orchestrate Opus through the Claude CLI (`claude -p --model claude-opus-4-8`) when the CLI
+is available. Native Codex subagents remain GPT-family; Opus participates as an external Architect.
+
 ### Or call it directly from Python
 
 ```bash
@@ -108,12 +131,12 @@ A repo is **untrusted unless you pass `trusted=True`** — untrusted runs requir
 | Path | What |
 |---|---|
 | `.claude-plugin/` | the plugin + marketplace manifests (so `/plugin install` works) |
-| `skills/implement/SKILL.md` | the skill front-matter + the loop the running Claude executes |
+| `skills/implement/SKILL.md` | the skill front-matter + the loop the running Claude/Codex session executes |
 | `skills/implement/references/` | phase-by-phase orchestration prose (intent, plan, review, draft-PR, handoff, guardrails, assembler) |
-| `skills/implement/scripts/` | the engine — see below |
+| `skills/implement/scripts/` | the engine — see below; `smoke.py` verifies the harness offline or live |
 | `knowledge-base/` | `loop-techniques.md` (57 harvested techniques × 12 loop dimensions) + `model-priors.json`/`swe-benchmarks.md` (the router's seed) |
 | `docs/` | `design.md` (the spec) · `overview.html` (visual one-pager) · `superpowers/{specs,plans}/` (design docs + implementation plans) |
-| `tests/` | 205 offline unit tests (a fixture repo under `tests/fixtures/`) |
+| `tests/` | offline unit tests (a fixture repo under `tests/fixtures/`) |
 
 The `skills/implement/scripts/` engine, by responsibility:
 
@@ -129,7 +152,7 @@ The `skills/implement/scripts/` engine, by responsibility:
 ## Testing
 
 ```bash
-python3 -m pytest -q          # 205 tests, offline (no network, no live models)
+python3 -m pytest -q          # offline tests (no network, no live models)
 ruff check . && mypy skills/implement/scripts
 ```
 
