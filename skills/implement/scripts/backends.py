@@ -25,7 +25,7 @@ def _entry_effort(entry: dict, fallback: str) -> str:
     return fallback
 
 
-def make_dispatcher(entry: dict, effort: str = "medium", max_tokens: int = 8000,
+def make_dispatcher(entry: dict, effort: str = "low", max_tokens: int = 12000,
                     temperature: float = 0.3, privacy: bool = False, runner=subprocess.run):
     if privacy and entry.get("data") != "private":
         raise PrivacyViolation(

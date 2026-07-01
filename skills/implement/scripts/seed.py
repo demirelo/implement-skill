@@ -39,8 +39,13 @@ def default_profile(models: dict, providers: dict) -> dict:
     creds = {}
     for prov in ("openrouter", "venice", "deepseek", "minimax", "kimi"):
         if prov in providers and providers[prov].get("key_ref"):
-            creds[prov] = {"source": "op", "ref": providers[prov]["key_ref"],
-                           "account": providers[prov].get("account", "")}
+            src = {"source": "op", "ref": providers[prov]["key_ref"],
+                   "account": providers[prov].get("account", "")}
+            if providers[prov].get("require_service_account"):
+                src["require_service_account"] = True
+            if providers[prov].get("service_account_keychain_service"):
+                src["service_account_keychain_service"] = providers[prov]["service_account_keychain_service"]
+            creds[prov] = src
     return {"version": 1, "pool": pool, "panels": panels, "credentials": creds,
-            "prefs": {"effort": "medium", "max_tokens": 8000, "temperature": 0.3,
+            "prefs": {"effort": "low", "max_tokens": 12000, "temperature": 0.3,
                       "privacy_default": False}}

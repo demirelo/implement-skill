@@ -104,7 +104,7 @@ def smoke_profile(live: bool):
             },
             "panels": {"architects": [], "builders": ["fake-builder"]},
             "credentials": {},
-            "prefs": {"effort": "medium", "max_tokens": 8000, "temperature": 0.0},
+            "prefs": {"effort": "low", "max_tokens": 12000, "temperature": 0.0},
         },
         FakeRun(),
     )

@@ -35,7 +35,9 @@ See `references/onboarding.md`.
 Codex note: this same folder is a native Codex skill. Use `scripts/smoke.py` for an offline harness
 check, and `scripts/smoke.py --live` when you explicitly want to call configured external Builders.
 `team_dispatch.py` reads `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`/`MOONSHOT_API_KEY`,
-`OPENROUTER_API_KEY`, and `VENICE_API_KEY` before falling back to 1Password.
+`OPENROUTER_API_KEY`, and `VENICE_API_KEY` before falling back to 1Password. For unattended Codex app
+sessions, prefer `op://...` provider refs with `require_service_account: true` and the 1Password
+service-account token stored in macOS Keychain service `op-service-account-token`.
 
 ## Running
 `implement.run_implement(repo, task)` loads the stored profile (or `seed.default_profile` from the

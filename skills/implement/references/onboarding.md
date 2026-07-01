@@ -4,16 +4,21 @@ Run once; stored in `~/.config/implement/config.json` (global) and optional
 `.implement/config.json` (per-project override). Stores only non-secret config —
 pool, panels, credential SOURCE declarations, prefs. Secrets stay in 1Password / env / `.env`.
 
-`scripts/team_dispatch.py` reads env credentials directly before falling back to 1Password:
+`scripts/team_dispatch.py` supports direct env credentials:
 `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`/`MOONSHOT_API_KEY`, `OPENROUTER_API_KEY`, and
-`VENICE_API_KEY`.
+`VENICE_API_KEY`. For providers marked `require_service_account`, it resolves the configured
+1Password `op://...` ref through a service-account token instead: first process env
+`OP_SERVICE_ACCOUNT_TOKEN`, then `launchctl getenv OP_SERVICE_ACCOUNT_TOKEN`, then the macOS
+Keychain service named by `service_account_keychain_service` (default: `op-service-account-token`).
+The token is passed only to the child `op read` subprocess.
 
 ## Flow (agent-driven)
 1. **Probe free models.** Claude (this session) and Codex MCP need no key — confirm availability.
 2. **Per external provider, ask the user how they will pass the key** (one at a time):
-   1Password service account · 1Password desktop · env var · `.env`. Default: *guide, never touch*
-   (print exact steps; read from the chosen source). Highlight **Venice = privacy lane** (e2ee) for
-   confidential repos.
+   1Password service account · 1Password desktop · env var · `.env`. Default for unattended Codex
+   app sessions: store the 1Password service-account token in Keychain service
+   `op-service-account-token`, keep provider keys as `op://...` refs, and set
+   `require_service_account: true`. Highlight **Venice = privacy lane** (e2ee) for confidential repos.
 3. **Validate** each with a real 1-token probe — `preflight.readiness(profile, probe=True)` runs
    `resolvers.validate(backends.probe_argv(entry))` and drops present-but-dead keys at setup, not mid-loop.
 4. **Compose panels** with `panel.default_panels(available)` as the editable default (the ladder:
@@ -21,9 +26,11 @@ pool, panels, credential SOURCE declarations, prefs. Secrets stay in 1Password /
 5. **Store** with `profile.save_profile(cfg, scope=...)`. Ensure `.gitignore` covers `.implement/`
    and `.env`.
 
-When env keys for DeepSeek, MiniMax, Kimi, or Venice are present, setup records the env variable name
-and routes that provider directly. This avoids placeholder 1Password/OpenRouter refs while still
-storing no secret values.
+Recommended unattended setup: keep provider API keys in 1Password as `op://.../credential` refs, and
+store only the 1Password service-account token in macOS Keychain service
+`op-service-account-token`. This avoids per-agent 1Password desktop prompts in the Codex app while
+keeping provider API keys out of files and process arguments. Env credentials remain supported for
+interactive/local use.
 
 ## Programmatic wizard
 `python3 skills/implement/scripts/setup.py` runs the whole flow (all IO injectable — `input_fn`/`getpass_fn`/`runner`

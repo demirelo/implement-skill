@@ -1,11 +1,12 @@
 {
-  "_comment": "Worker dispatch config. Secrets are 1Password references (op://<vault>/<item>/credential), fetched per call via `op read` — never stored or printed. Replace <vault> and the account placeholder with your own, or supply credentials another way (OP_SERVICE_ACCOUNT_TOKEN / env var / .env / macOS keychain) via `setup.py`. Direct providers auto-fall back to OpenRouter on 429/5xx. OpenRouter slugs verified live 2026-06. Venice model is a default — confirm against api.venice.ai/api/v1/models.",
+  "_comment": "Worker dispatch config. Secrets are 1Password references (op://<vault>/<item>/credential), fetched per call via `op read` — never stored or printed. Replace <vault> and the account placeholder with your own, or supply credentials another way (OP_SERVICE_ACCOUNT_TOKEN / env var / .env / macOS keychain) via `setup.py`. Set require_service_account=true in local config to force unattended 1Password service-account reads. Direct providers auto-fall back to OpenRouter on 429/5xx. OpenRouter slugs verified live 2026-06. Venice model is a default — confirm against api.venice.ai/api/v1/models.",
 
   "deepseek": {
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-v4-pro",
     "account": "<your-1password-account>",
     "key_ref": "op://<vault>/deepseek-api-key/credential",
+    "service_account_keychain_service": "op-service-account-token",
     "fallback": {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}
   },
 
@@ -14,6 +15,7 @@
     "model": "MiniMax-M3",
     "account": "<your-1password-account>",
     "key_ref": "op://<vault>/minimax-api-key/credential",
+    "service_account_keychain_service": "op-service-account-token",
     "fallback": {"provider": "openrouter", "model": "minimax/minimax-m3"}
   },
 
@@ -22,6 +24,7 @@
     "model": "kimi-k2.7-code",
     "account": "<your-1password-account>",
     "key_ref": "op://<vault>/kimi-api-key/credential",
+    "service_account_keychain_service": "op-service-account-token",
     "extra_body": {"temperature": 1},
     "fallback": {"provider": "openrouter", "model": "moonshotai/kimi-k2.7-code"}
   },
@@ -31,6 +34,7 @@
     "model": "kimi-k2.7-code-highspeed",
     "account": "<your-1password-account>",
     "key_ref": "op://<vault>/kimi-api-key/credential",
+    "service_account_keychain_service": "op-service-account-token",
     "extra_body": {"temperature": 1},
     "fallback": {"provider": "openrouter", "model": "moonshotai/kimi-k2.7-code"}
   },
@@ -40,6 +44,7 @@
     "model": "moonshotai/kimi-k2.7-code",
     "account": "<your-1password-account>",
     "key_ref": "op://<vault>/openrouter-api-key/credential",
+    "service_account_keychain_service": "op-service-account-token",
     "extra_headers": {"HTTP-Referer": "https://localhost/implement", "X-Title": "implement"}
   },
 
@@ -48,6 +53,7 @@
     "model": "e2ee-glm-5-2-p",
     "account": "<your-1password-account>",
     "key_ref": "op://<vault>/venice-api-key/credential",
+    "service_account_keychain_service": "op-service-account-token",
     "_note": "Venice = privacy router (e2ee). GLM 5.2 (Z.ai); cost tier. Use for confidential repos. Alt non-e2ee model: zai-org-glm-5-2"
   }
 }

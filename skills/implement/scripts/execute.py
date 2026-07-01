@@ -191,7 +191,7 @@ def make_ow_dispatcher(provider, effort="medium", runner=subprocess.run):
     def fn(prompt):
         proc = runner(
             ["python3", str(_DISPATCH), "--provider", provider,
-             "--effort", effort, "--max-tokens", "8000"],
+             "--effort", effort, "--max-tokens", "12000"],
             input=prompt, capture_output=True, text=True, timeout=650)
         if proc.returncode != 0 or not proc.stdout.strip():
             raise DispatchError(

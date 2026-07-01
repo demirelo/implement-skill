@@ -10,7 +10,7 @@ the #1 failure mode of the raw script. Also prints token usage + $ cost to stder
 Prompt on stdin. Worker text on stdout. Usage/cost on stderr.
 
   echo "$PROMPT" | python3 team-dispatch.py --provider deepseek --route direct
-  echo "$PROMPT" | python3 team-dispatch.py --provider kimi     --route openrouter --effort medium
+  echo "$PROMPT" | python3 team-dispatch.py --provider kimi     --route openrouter --effort low
   echo "$PROMPT" | python3 team-dispatch.py --provider glm      --route direct   # Venice e2ee (confidential)
 
 Providers: deepseek | minimax | kimi | glm   (+ openrouter as a raw passthrough)
@@ -37,6 +37,10 @@ ENV_KEYS = {
     "venice": ("VENICE_API_KEY",),
 }
 
+SERVICE_ACCOUNT_ENV = "OP_SERVICE_ACCOUNT_TOKEN"
+SERVICE_ACCOUNT_KEYCHAIN_ENV = "IMPLEMENT_OP_SERVICE_ACCOUNT_KEYCHAIN_SERVICE"
+DEFAULT_SERVICE_ACCOUNT_KEYCHAIN_SERVICE = "op-service-account-token"
+
 
 class TransientHTTPError(RuntimeError):
     pass
@@ -54,23 +58,76 @@ def env_read(provider):
     return ""
 
 
-def op_read(ref, account):
+def service_account_keychain_service(cfg=None):
+    return ((cfg or {}).get("service_account_keychain_service")
+            or os.environ.get(SERVICE_ACCOUNT_KEYCHAIN_ENV)
+            or DEFAULT_SERVICE_ACCOUNT_KEYCHAIN_SERVICE)
+
+
+def keychain_read_service_account_token(service):
+    r = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0 or not r.stdout.strip():
+        return ""
+    return r.stdout.strip()
+
+
+def launchctl_get(var):
+    r = subprocess.run(["launchctl", "getenv", var], capture_output=True, text=True, timeout=10)
+    if r.returncode != 0 or not r.stdout.strip():
+        return ""
+    return r.stdout.strip()
+
+
+def service_account_token(cfg=None):
+    token = os.environ.get(SERVICE_ACCOUNT_ENV)
+    if token:
+        return token
+    token = launchctl_get(SERVICE_ACCOUNT_ENV)
+    if token:
+        return token
+    return keychain_read_service_account_token(service_account_keychain_service(cfg))
+
+
+def op_read(ref, account, require_service_account=False, cfg=None):
+    token = (
+        service_account_token(cfg)
+        if require_service_account or (cfg or {}).get("service_account_keychain_service")
+        else os.environ.get(SERVICE_ACCOUNT_ENV, "")
+    )
+    if require_service_account and not token:
+        service = service_account_keychain_service(cfg)
+        sys.exit(
+            "team-dispatch: OP_SERVICE_ACCOUNT_TOKEN is required for unattended "
+            f"1Password reads. Set it in the environment or store it in Keychain service {service!r}."
+        )
+    env = os.environ.copy()
+    if token:
+        env[SERVICE_ACCOUNT_ENV] = token
     argv = ["op", "read", ref]
-    if account and "OP_SERVICE_ACCOUNT_TOKEN" not in os.environ:
+    if account and not token:
         argv += ["--account", account]
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
     if r.returncode != 0:
-        sys.exit(f"team-dispatch: op read failed ({r.stderr.strip()}). Unlock 1Password, or export OP_SERVICE_ACCOUNT_TOKEN for unattended runs.")
+        sys.exit(
+            f"team-dispatch: op read failed ({r.stderr.strip()}). "
+            "Unlock 1Password, export OP_SERVICE_ACCOUNT_TOKEN, or configure the service-account token in Keychain."
+        )
     return r.stdout.strip()
 
 
 def maybe_resolve_key(provider, cfg):
+    ref = cfg.get("key_ref")
+    require_service_account = bool(cfg.get("require_service_account"))
+    if require_service_account:
+        if ref and "<" not in ref and ">" not in ref:
+            return op_read(ref, cfg.get("account"), require_service_account=True, cfg=cfg)
+        return ""
     key = env_read(provider)
     if key:
         return key
-    ref = cfg.get("key_ref")
     if ref and "<" not in ref and ">" not in ref:
-        return op_read(ref, cfg.get("account"))
+        return op_read(ref, cfg.get("account"), cfg=cfg)
     return ""
 
 
@@ -134,9 +191,9 @@ def main():
     ap.add_argument("--provider", required=True, choices=list(PANEL)+["openrouter"])
     ap.add_argument("--route", default="openrouter", choices=["openrouter","direct"])
     ap.add_argument("--model", default=None, help="override slug/model")
-    ap.add_argument("--effort", default="medium", choices=["none","low","medium","high"],
-                    help="reasoning cap — 'medium' keeps content flowing; 'none' omits the field")
-    ap.add_argument("--max-tokens", type=int, default=8000)
+    ap.add_argument("--effort", default="low", choices=["none","low","medium","high"],
+                    help="reasoning cap — 'low' keeps content flowing; 'none' omits the field")
+    ap.add_argument("--max-tokens", type=int, default=12000)
     ap.add_argument("--temperature", type=float, default=0.3)
     ap.add_argument("--system", default=None)
     ap.add_argument("--timeout", type=int, default=600)

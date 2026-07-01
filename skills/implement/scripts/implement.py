@@ -63,8 +63,8 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     prefs = profile.get("prefs", {})
 
     def _dispatcher(model):
-        return make_dispatcher(pool[model], effort=prefs.get("effort", "medium"),
-                               max_tokens=prefs.get("max_tokens", 8000),
+        return make_dispatcher(pool[model], effort=prefs.get("effort", "low"),
+                               max_tokens=prefs.get("max_tokens", 12000),
                                temperature=prefs.get("temperature", 0.3),
                                privacy=privacy, runner=runner)
 
@@ -86,7 +86,7 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
                 except (PrivacyViolation, UnsupportedBackend):  # skip non-dispatchable/standard architects
                     continue
     if not dispatchers:
-        raise RuntimeError("no live Builder in the panel — run `/implement setup`")
+        raise RuntimeError("no live Builder in the panel — run the implement setup wizard")
     best = run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=max_turns,
                          wrap=_wrap, crit=KillCriteria(max_turns=max_turns))
     outcomes.log_run(best, bucket, list(dispatchers), path=ledger_path)   # learn from this run

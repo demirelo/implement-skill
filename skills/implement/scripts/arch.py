@@ -50,7 +50,7 @@ def _entry_effort(entry: dict, fallback: str) -> str:
     return fallback
 
 
-def make_arch_dispatcher(entry: dict, *, effort: str = "high", max_tokens: int = 4000,
+def make_arch_dispatcher(entry: dict, *, effort: str = "high", max_tokens: int = 12000,
                          temperature: float = 0.2, secrets=None,
                          runner=subprocess.run) -> Callable[[str], str]:
     backend = entry.get("backend")

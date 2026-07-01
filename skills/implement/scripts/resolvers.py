@@ -5,6 +5,10 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+_SERVICE_ACCOUNT_ENV = "OP_SERVICE_ACCOUNT_TOKEN"
+_SERVICE_ACCOUNT_KEYCHAIN_ENV = "IMPLEMENT_OP_SERVICE_ACCOUNT_KEYCHAIN_SERVICE"
+_DEFAULT_SERVICE_ACCOUNT_KEYCHAIN_SERVICE = "op-service-account-token"
+
 
 @dataclass(frozen=True)
 class Cred:
@@ -12,11 +16,57 @@ class Cred:
     source: str
 
 
-def _op_read(ref: str, account: str | None, env: dict, runner) -> str | None:
+def _keychain_get(service: str | None, runner) -> str | None:
+    if not service:
+        return None
+    proc = runner(["security", "find-generic-password", "-s", service, "-w"],
+                  capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return proc.stdout.strip()
+
+
+def _launchctl_get(var: str, runner) -> str | None:
+    proc = runner(["launchctl", "getenv", var], capture_output=True, text=True, timeout=10)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return proc.stdout.strip()
+
+
+def _service_account_token(env: dict, service: str | None, runner) -> str | None:
+    merged_env = {**os.environ, **env}
+    token = merged_env.get(_SERVICE_ACCOUNT_ENV)
+    if token:
+        return token
+    token = _launchctl_get(_SERVICE_ACCOUNT_ENV, runner)
+    if token:
+        return token
+    keychain_service = (
+        service
+        or merged_env.get(_SERVICE_ACCOUNT_KEYCHAIN_ENV)
+        or _DEFAULT_SERVICE_ACCOUNT_KEYCHAIN_SERVICE
+    )
+    return _keychain_get(keychain_service, runner)
+
+
+def _op_read(ref: str, account: str | None, env: dict, runner,
+             require_service_account: bool = False,
+             service_account_keychain_service: str | None = None) -> str | None:
+    merged_env = {**os.environ, **env}
+    token = (
+        _service_account_token(env, service_account_keychain_service, runner)
+        if require_service_account or service_account_keychain_service
+        else merged_env.get(_SERVICE_ACCOUNT_ENV)
+    )
+    if token:
+        merged_env[_SERVICE_ACCOUNT_ENV] = token
+    has_service_account = bool(token)
+    if require_service_account and not has_service_account:
+        return None
     argv = ["op", "read", ref]
-    if account and "OP_SERVICE_ACCOUNT_TOKEN" not in {**os.environ, **env}:
+    if account and not has_service_account:
         argv += ["--account", account]      # service-account tokens reject --account
-    proc = runner(argv, capture_output=True, text=True, timeout=60, env={**os.environ, **env})
+    proc = runner(argv, capture_output=True, text=True, timeout=60, env=merged_env)
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
     return proc.stdout.strip()
@@ -54,7 +104,9 @@ def resolve(cred_cfg: dict, env: dict | None = None, runner=subprocess.run) -> "
         v = _dotenv_get(cred_cfg.get("path", ".env"), cred_cfg["var"])
         return Cred(v, "dotenv") if v else None
     if src == "op":
-        v = _op_read(cred_cfg["ref"], cred_cfg.get("account"), env, runner)
+        v = _op_read(cred_cfg["ref"], cred_cfg.get("account"), env, runner,
+                     bool(cred_cfg.get("require_service_account")),
+                     cred_cfg.get("service_account_keychain_service"))
         return Cred(v, "op") if v else None
     if src == "keychain":
         proc = runner(["security", "find-generic-password", "-s", cred_cfg["service"], "-w"],
