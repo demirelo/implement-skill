@@ -1,6 +1,6 @@
 {
   "architects": {
-    "claude": {"via": "orchestrator", "model": "claude-opus-4-8"},
+    "claude": {"via": "orchestrator", "model": "claude-opus-4-8", "effort": "max"},
     "gpt":    {"via": "codex_mcp",    "model": "gpt-5.5", "effort": "xhigh"},
     "glm":    {"via": "team_dispatch","provider": "glm", "effort": "high"}
   },

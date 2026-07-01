@@ -36,6 +36,15 @@ def test_claude_headless_backend_builds_model_call():
     fn("do it")
     argv, _ = fake.calls[0]
     assert argv[:2] == ["claude", "-p"] and "--model" in argv and "claude-sonnet-4-6" in argv
+    assert "--effort" not in argv
+
+
+def test_claude_headless_opus_defaults_to_max_effort():
+    fake = FakeRun()
+    fn = make_dispatcher({"backend": "claude_headless", "model": "claude-opus-4-8"}, runner=fake)
+    fn("do it")
+    argv, _ = fake.calls[0]
+    assert argv[argv.index("--effort") + 1] == "max"
 
 
 def test_nonzero_exit_raises():
@@ -72,6 +81,13 @@ def test_probe_argv_claude_headless():
     from backends import probe_argv
     argv = probe_argv({"backend": "claude_headless", "model": "claude-sonnet-4-6"})
     assert argv[:2] == ["claude", "-p"] and "claude-sonnet-4-6" in argv
+    assert "--effort" not in argv
+
+
+def test_probe_argv_claude_headless_opus_defaults_to_max():
+    from backends import probe_argv
+    argv = probe_argv({"backend": "claude_headless", "model": "claude-opus-4-8"})
+    assert argv[argv.index("--effort") + 1] == "max"
 
 
 def test_make_dispatcher_threads_model_override():

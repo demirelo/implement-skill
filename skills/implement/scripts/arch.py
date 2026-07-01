@@ -42,19 +42,28 @@ class ArchCall:
     error: str = ""
 
 
+def _entry_effort(entry: dict, fallback: str) -> str:
+    if entry.get("effort"):
+        return entry["effort"]
+    if entry.get("backend") == "claude_headless" and "opus" in entry.get("model", "").lower():
+        return "max"
+    return fallback
+
+
 def make_arch_dispatcher(entry: dict, *, effort: str = "high", max_tokens: int = 4000,
                          temperature: float = 0.2, secrets=None,
                          runner=subprocess.run) -> Callable[[str], str]:
     backend = entry.get("backend")
+    dispatch_effort = _entry_effort(entry, effort)
     if backend == "team_dispatch":
         argv = ["python3", str(_DISPATCH), "--provider", entry["provider"],
                 "--route", entry.get("route", "openrouter"),
-                "--effort", effort, "--max-tokens", str(max_tokens),
+                "--effort", dispatch_effort, "--max-tokens", str(max_tokens),
                 "--temperature", str(temperature)]
         if entry.get("model"):
             argv += ["--model", entry["model"]]
     elif backend == "claude_headless":
-        argv = ["claude", "-p", "--model", entry["model"]]
+        argv = ["claude", "-p", "--model", entry["model"], "--effort", dispatch_effort]
     else:
         raise UnsupportedArchBackend(f"backend {backend!r} is not script-dispatchable")
 

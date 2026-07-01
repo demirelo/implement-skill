@@ -29,7 +29,7 @@ Exactly **two human touchpoints**: confirm intent (0) and merge (5). Everything 
 (1Password ref · env var · `.env` · macOS keychain; raw keys via a hidden prompt, never echoed),
 probes each with a 1-token check, and stores the model pool + Architects/Builders panels in
 `~/.config/implement/config.json`. The loop runs on a **Claude-only floor with zero external keys**
-(Opus Architect, Sonnet/Haiku Builders); OpenRouter/Venice/Codex keys upgrade the panels.
+(Opus Architect at `effort: "max"`, Sonnet/Haiku Builders); OpenRouter/Venice/Codex keys upgrade the panels.
 See `references/onboarding.md`.
 
 Codex note: this same folder is a native Codex skill. Use `scripts/smoke.py` for an offline harness

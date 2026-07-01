@@ -17,6 +17,14 @@ class PrivacyViolation(RuntimeError):
     pass
 
 
+def _entry_effort(entry: dict, fallback: str) -> str:
+    if entry.get("effort"):
+        return entry["effort"]
+    if entry.get("backend") == "claude_headless" and "opus" in entry.get("model", "").lower():
+        return "max"
+    return fallback
+
+
 def make_dispatcher(entry: dict, effort: str = "medium", max_tokens: int = 8000,
                     temperature: float = 0.3, privacy: bool = False, runner=subprocess.run):
     if privacy and entry.get("data") != "private":
@@ -24,17 +32,20 @@ def make_dispatcher(entry: dict, effort: str = "medium", max_tokens: int = 8000,
             f"privacy mode: refusing to dispatch standard-API model "
             f"{entry.get('provider') or entry.get('model')!r}")
     backend = entry.get("backend")
+    dispatch_effort = _entry_effort(entry, effort)
     if backend == "team_dispatch":
         # route selects the credential team_dispatch actually consumes: 'openrouter' (shared
         # key, default) vs 'direct' (per-provider; Venice e2ee for the private lane).
         argv = ["python3", str(_DISPATCH), "--provider", entry["provider"],
                 "--route", entry.get("route", "openrouter"),
-                "--effort", effort, "--max-tokens", str(max_tokens),
+                "--effort", dispatch_effort, "--max-tokens", str(max_tokens),
                 "--temperature", str(temperature)]
         if entry.get("model"):  # a specific slug (e.g. a Venice e2ee model) overrides the route default
             argv += ["--model", entry["model"]]
     elif backend == "claude_headless":
         argv = ["claude", "-p", "--model", entry["model"]]
+        if dispatch_effort == "max" or entry.get("effort"):
+            argv += ["--effort", dispatch_effort]
     else:
         raise UnsupportedBackend(f"backend {backend!r} is not script-dispatchable")
 
@@ -55,5 +66,9 @@ def probe_argv(entry: dict) -> list:
         return ["python3", str(_DISPATCH), "--provider", entry["provider"],
                 "--route", entry.get("route", "openrouter"), "--max-tokens", "1", "--effort", "none"]
     if backend == "claude_headless":
-        return ["claude", "-p", "--model", entry["model"]]
+        argv = ["claude", "-p", "--model", entry["model"]]
+        dispatch_effort = _entry_effort(entry, "")
+        if dispatch_effort:
+            argv += ["--effort", dispatch_effort]
+        return argv
     raise UnsupportedBackend(f"backend {backend!r} has no probe")

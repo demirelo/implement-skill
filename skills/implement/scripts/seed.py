@@ -24,8 +24,8 @@ def _pool_entry(name: str, spec: dict) -> dict:
                      data="private" if private else "standard")
     else:  # codex_mcp — carry model + reasoning effort so the orchestrator pins them on every call
         entry["model"] = spec.get("model", name)
-        if spec.get("effort"):
-            entry["effort"] = spec["effort"]
+    if spec.get("effort"):
+        entry["effort"] = spec["effort"]
     entry.setdefault("data", "standard")
     return entry
 

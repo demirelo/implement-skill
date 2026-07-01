@@ -110,8 +110,9 @@ secret values: `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`/`MOONSHOT_A
 routes those Builders directly to their provider APIs so Codex runs do not fall into placeholder
 1Password/OpenRouter config.
 
-Codex can orchestrate Opus through the Claude CLI (`claude -p --model claude-opus-4-8`) when the CLI
-is available. Native Codex subagents remain GPT-family; Opus participates as an external Architect.
+Codex can orchestrate Opus through the Claude CLI
+(`claude -p --model claude-opus-4-8 --effort max`) when the CLI is available. Native Codex subagents
+remain GPT-family; Opus participates as an external Architect.
 
 ### Or call it directly from Python
 

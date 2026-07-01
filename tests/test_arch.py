@@ -38,6 +38,16 @@ def test_arch_dispatcher_uses_architect_defaults():
     assert argv[argv.index("--temperature") + 1] == "0.2"
 
 
+def test_arch_dispatcher_defaults_opus_to_max_effort():
+    fake = FakeRun()
+    make_arch_dispatcher(
+        {"backend": "claude_headless", "model": "claude-opus-4-8"},
+        runner=fake,
+    )("p")
+    argv, _ = fake.calls[0]
+    assert argv[argv.index("--effort") + 1] == "max"
+
+
 def test_arch_dispatcher_scrubs_outbound_prompt():
     # the Architect path must redact secrets before they reach a provider, like the Builder path
     fake = FakeRun()

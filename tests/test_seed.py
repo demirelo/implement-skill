@@ -24,6 +24,17 @@ def test_default_profile_maps_backends_and_panels():
     assert p["panels"]["builders"] == ["deepseek"]
 
 
+def test_default_profile_preserves_opus_effort():
+    models = {
+        "architects": {
+            "claude": {"via": "orchestrator", "model": "claude-opus-4-8", "effort": "max"}
+        },
+        "builders": {},
+    }
+    p = default_profile(models, PROVIDERS)
+    assert p["pool"]["claude"]["effort"] == "max"
+
+
 def test_default_profile_routes_glm_private_via_venice():
     p = default_profile(MODELS, PROVIDERS)
     glm = p["pool"]["glm"]
