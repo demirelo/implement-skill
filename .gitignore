@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.gstack/
+.worktrees/
+*.private.bak
+providers.json.private*
+.DS_Store
