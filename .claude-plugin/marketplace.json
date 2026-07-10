@@ -1,0 +1,11 @@
+{
+  "name": "implement-skill",
+  "owner": { "name": "demirelo" },
+  "plugins": [
+    {
+      "name": "implement",
+      "source": "./",
+      "description": "Autonomous SWE loop — builds a feature end-to-end against an objective test oracle, sandboxed; auto-merges the PR on a fully-green result and falls back to a human handoff when review is uncertain or the gate is red. Self-improving local model router."
+    }
+  ]
+}

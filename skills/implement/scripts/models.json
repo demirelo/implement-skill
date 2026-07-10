@@ -1,0 +1,17 @@
+{
+  "architects": {
+    "claude": {"via": "orchestrator", "model": "claude-opus-4-8", "effort": "max"},
+    "gpt":    {"via": "codex_mcp",    "model": "gpt-5.6-sol", "effort": "xhigh"},
+    "glm":    {"via": "team_dispatch","provider": "glm", "effort": "high"}
+  },
+  "builders": {
+    "sonnet":   {"via": "claude_headless", "model": "claude-sonnet-4-6"},
+    "haiku":    {"via": "claude_headless", "model": "claude-haiku-4-5"},
+    "deepseek": {"via": "team_dispatch", "provider": "deepseek"},
+    "minimax":  {"via": "team_dispatch", "provider": "minimax"},
+    "kimi":     {"via": "team_dispatch", "provider": "kimi"},
+    "venice-glm":     {"via": "venice", "model": "e2ee-glm-5-2-p"},
+    "venice-qwen":    {"via": "venice", "model": "e2ee-qwen3-30b-a3b-p"},
+    "venice-gpt-oss": {"via": "venice", "model": "e2ee-gpt-oss-120b-p"}
+  }
+}

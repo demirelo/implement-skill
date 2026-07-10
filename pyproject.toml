@@ -1,0 +1,17 @@
+[project]
+name = "implement-skill"
+version = "1.0.0"
+requires-python = ">=3.11"
+license = "MIT"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--ignore=tests/fixtures"
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["skills/implement/scripts/team_dispatch.py"]
+
+[tool.mypy]
+ignore_missing_imports = true
+exclude = "skills/implement/scripts/team_dispatch.py"

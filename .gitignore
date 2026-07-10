@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.gstack/
+.worktrees/
+*.private.bak
+providers.json.private*
+.DS_Store
+
+# stray symlink into a second clone — never commit (leaks the home path)
+skills/implement/implement

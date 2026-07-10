@@ -1,0 +1,19 @@
+{
+  "name": "typescript-vitest",
+  "detect": ["vitest.config.ts", "vitest.config.js", "vitest.config.mts", "vitest.config.mjs", "vitest.workspace.ts", "vite.config.ts", "pnpm-workspace.yaml", "package.json"],
+  "test_layout": "*.test.ts / *.spec.ts colocated with source or under __tests__/; describe()/it()/test() blocks with expect() assertions (vitest globals, or explicit `import { describe, it, expect } from 'vitest'`)",
+  "test_cmd": "npx vitest run --reporter=dot --no-color",
+  "test_one": "npx vitest run --reporter=dot --no-color {path}",
+  "timeout": 900,
+  "lint_cmd": "npx eslint .",
+  "type_cmd": "npx tsc --noEmit",
+  "monorepo": {
+    "detect": ["pnpm-workspace.yaml", "package.json:workspaces", "turbo.json", "nx.json", "lerna.json"],
+    "package_manager": {"pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "package-lock.json": "npm", "bun.lockb": "bun"},
+    "note": "In a pnpm/npm/yarn workspace, scope the gates to the changed package via its package name so a slice does not run (or fail on) the whole repo. Prefer the package manager the lockfile names. The two-tier gate's `test_one` still scopes to individual *.test.ts files across the workspace; these package-scoped forms are what an Architect should pin once the target package is known.",
+    "test_pkg": "pnpm --filter {pkg} test",
+    "test_one_pkg": "pnpm --filter {pkg} exec vitest run --reporter=dot --no-color {path}",
+    "type_pkg": "pnpm --filter {pkg} exec tsc --noEmit",
+    "lint_pkg": "pnpm --filter {pkg} exec eslint ."
+  }
+}
