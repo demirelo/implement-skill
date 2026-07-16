@@ -3,17 +3,18 @@
 [![CI](https://github.com/demirelo/implement-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/demirelo/implement-skill/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-`/implement` builds a feature or fix **end-to-end into a GitHub PR**. It runs two model teams —
-**Architects** (judgment) and **Builders** (execution) — against an **objective test oracle**, inside
-a sandbox. On a fully-green result it **merges the PR itself**; when review is uncertain or the gate is
-red, it falls back to a ready-for-review PR for a human. You seal the intent; the loop does the rest.
+`/implement` executes an existing Plan **end-to-end as multiple GitHub PRs**. You provide the Plan,
+the Builder models, one final Reviewer model, and optionally the Best-of-N width (default `2`).
+Independent Plan items run concurrently in isolated worktrees; each item gets its own tests, review,
+CI lifecycle, and PR. Failed CI and merge conflicts are routed back to the configured Builders
+automatically.
 
 It ships for **two hosts**: a **[Claude Code](#getting-started-claude-code) plugin** and a
 **native [Codex](#getting-started-codex) skill** — the same `skills/implement/` folder drives both.
 
 It is the software-engineering "door" of a general adversarial-loop engine (`/loop`). The principles:
-a swappable pool of models you own, a router that learns on *your* machine, a hard **test gate**
-instead of model-judged verification, and the human kept at the two decisions that matter. See
+a swappable pool of models you own, explicit per-run role selection, a hard **test gate**
+instead of model-judged verification, and green-gated PR automation. See
 [`docs/design.md`](docs/design.md) for the full design and [`docs/overview.html`](docs/overview.html)
 for a visual one-pager.
 
@@ -22,35 +23,30 @@ for a visual one-pager.
 
 ---
 
-## The loop (you seal intent; on green it merges itself — everything else automated)
+## The campaign
 
 ```
-0. INTENT        Architects ⇄ human    pin the goal to acceptance criteria; human confirms   ← touchpoint #1
-1. PLAN + TESTS  Architects consensus  vertical-slice DAG + acceptance tests = the ORACLE (immutable)
-2. IMPLEMENT     Builders best-of-N ⇄ sandboxed local gates    inner loop to green; smallest green diff wins
-3. DRAFT PR      push the branch, open a draft pull request
-4. REVIEW        Architects (3 lenses) ⇄ Builders fix    route objective findings back; re-gate the winner
-5. HANDOFF       🟢/🟡/🔴 tier + structured body    🟢 → AUTO-MERGE  ·  🟡/🔴 → ready PR for a human ← touchpoint #2 (only if not green)
+0. NORMALIZE     Plan → PR-sized dependency DAG + acceptance criteria + touched areas
+1. SCHEDULE      dependency-ready, non-overlapping items run in parallel worktrees
+2. IMPLEMENT     configured Builders compete Best-of-N per item; smallest green diff wins
+3. REVIEW        the configured Reviewer approves or routes findings back to the same Builders
+4. DRAFT PR      one branch, worktree, test scope, CI run, and draft PR per Plan item
+5. REPAIR        failed CI, review findings, and merge conflicts loop back automatically
+6. FINALIZE      green + conflict-free → ready/assigned/auto-merge; policy blockers → handoff
 ```
 
-The Architects **write the acceptance tests; the Builders make them green** — that converts the
-hand-off into an objective oracle, not an opinion. The tests live in the *target repo's own* framework
-(pytest, vitest, `forge test`…) so a green is real, never vacuous.
+Parallelism exists at two levels: independent PR workstreams run concurrently, and each workstream
+runs its configured N Builder candidates concurrently.
 
-## The two teams
+## Model roles
 
-| Team | Models (default) | Role |
+| Role | Selection | Responsibility |
 |---|---|---|
-| **Architects** | Claude Opus · GPT-5.6 Sol (Codex) · GLM-5.2 (Venice) | intent · planning consensus · authoring the acceptance tests · adversarial review |
-| **Builders** | DeepSeek · MiniMax · Kimi · Sonnet/Haiku floor · Venice e2ee lane | implement against the oracle (text-in → diff-out; a deterministic script applies + gates) |
+| **Builders** | User-provided ordered list; first N compete, N defaults to 2 | implementation, review fixes, CI fixes, conflict resolution |
+| **Reviewer** | One user-provided model | fresh final review for correctness, security, regressions, tests, and simplicity |
 
-Role-based, not license-based — and the table above is **config, not code**. Seat whatever frontier
-models you own: swap **GPT-5.6 Luna** into the Codex seat, add **Grok 4.5** as an extra
-review lens, or slot next month's model the day it ships — any OpenAI-compatible endpoint works
-(`providers.json` + the pool config), and one OpenRouter key fronts most of them. The loop runs on a
-**Claude-only floor with zero external keys**, and OpenRouter / Venice / Codex keys upgrade the
-panels. A **privacy lane** (Venice e2ee) keeps a confidential repo's code on an end-to-end-encrypted
-path — and GLM-5.2 there is the *best* open model, so privacy is no longer a quality trade-off.
+The explicit per-run configuration is authoritative. The engine never silently substitutes,
+promotes, or adds models.
 
 ## What makes it safe + smart
 
@@ -60,11 +56,10 @@ path — and GLM-5.2 there is the *best* open model, so privacy is no longer a q
 - **Guardrails.** Allowlist-first destructive-command gating · git-worktree isolation (never the
   live tree) · kill criteria + named stop-and-ask · a suitability filter that refuses a run with no
   oracle.
-- **Learned router.** Each run featurizes the task, ranks Builders by a deterministic
-  Beta-Bernoulli posterior (benchmark **priors** blended with *this machine's* local win-rates + UCB
-  exploration), dispatches the top-k, and logs the outcome — so the **next run is smarter**. Cold-start
-  from public benchmarks (SWE-bench Pro, Terminal-Bench, LiveCodeBench, WebDev Arena…); converges to
-  your measured outcomes. The ledger holds model ids + counts only — never secrets.
+- **Parallel PR isolation.** Dependency- and touched-area-safe waves run concurrently, while shared
+  git metadata operations remain serialized.
+- **Automatic repair.** Failed CI logs and conflicted files are sent back through the configured
+  Best-of-N Builders, then locally gated, re-reviewed, pushed, and rechecked.
 - **Secrets discipline.** A scrubber redacts credentials at every outbound boundary; the dispatch
   script holds keys (1Password refs / keychain / env / `.env`), models never receive them.
 
@@ -85,31 +80,33 @@ Seatbelt sandbox out of the box; on Linux, install Docker for the sandbox.
 
 <sub>Manual alternative: `git clone https://github.com/demirelo/implement-skill ~/implement-skill && ln -s ~/implement-skill/skills/implement ~/.claude/skills/implement`</sub>
 
-**3. Use it** — type `/implement` and describe the change:
+**3. Use it** — attach a Plan and provide the model roles:
 
-> `/implement add rate-limiting to the /login endpoint, with tests`
+```yaml
+/implement
+Plan: <attached>
+Models:
+  builders: [minimax, luna]
+  reviewer: sol
+  best_of_n: 2
+```
 
-It runs out of the box on a **Claude-only floor** (Opus as Architect, Sonnet/Haiku as Builders) with
-no external keys. The running Claude pins the intent with you, the Architects write the acceptance
-tests, the Builders make them green in a sandbox, and on a fully-green result the loop **opens and
-merges the PR itself** — so on the clean path you're asked **once** (confirm the intent). If review
-can't verify something (🟡) or the gate is red (🔴), it stops and leaves a ready PR for you instead.
-Prefer to merge everything yourself? Set `autonomy: handoff` and it always leaves the PR. Auto-merge
-never bypasses branch protection — if your repo requires a review, the PR just waits.
+`best_of_n` may be omitted and defaults to `2`. The Plan is normalized into one self-contained PR
+per item, and independent items start in parallel. Auto-merge never bypasses branch protection; a
+repository-policy blocker leaves a ready PR.
 
-**4. Provide credentials for the full panel** — the keyless floor is Claude-only; the diverse,
-multi-model best-of-N needs credentials, so **you have to input them**. You give either the **key
-values** or (better) **credential paths** — a 1Password `op://<vault>/<item>/credential` reference, an
-env-var name, a `.env` entry, or a macOS keychain service. Real secret values are **never written to
-the repo**: the tracked `providers.json` is a *template* with `<vault>` / `<your-1password-account>`
-placeholders you fill in, and the wizard stores only **non-secret** config (which source, which
-ref/name) in `~/.config/implement/`:
+**4. Configure the available model pool once** — selected external Builders/Reviewers need
+credentials. Provide either key values or, preferably, credential paths: a 1Password
+`op://<vault>/<item>/credential` reference, env-var name, `.env` entry, or macOS keychain service.
+Real secret values are **never written to the repo**: the wizard stores only non-secret source
+configuration in `~/.config/implement/`:
 
 ```bash
 python3 skills/implement/scripts/setup.py     # walks you through it (from a clone of the repo)
 ```
 
-Simplest path: set **one** `OPENROUTER_API_KEY` env var — it fronts every model, no 1Password needed.
+Simplest path: set **one** `OPENROUTER_API_KEY` env var — it fronts OpenRouter models in the
+configured pool, no 1Password needed.
 Full precedence (env / `.env` / keychain / 1Password) and the template rules are in
 [`skills/implement/references/credentials.md`](skills/implement/references/credentials.md).
 
@@ -138,18 +135,22 @@ secret values: `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`/`MOONSHOT_A
 routes those Builders directly to their provider APIs so Codex runs do not fall into placeholder
 1Password/OpenRouter config.
 
-Codex can orchestrate Opus through the Claude CLI
-(`claude -p --model claude-opus-4-8 --effort max`) when the CLI is available. Native Codex subagents
-remain GPT-family; Opus participates as an external Architect.
+Models backed by the running host use the host callback seam; script-dispatchable models use the
+configured pool and credential sources.
 
-### Or call it directly from Python
+### Or call a campaign directly from Python
 
 ```bash
 python3 - <<'PY'
 import sys; sys.path.insert(0, "skills/implement/scripts")
-from implement import run_implement
-best = run_implement("/path/to/your/repo", "add a multiply() helper to mathx.ops")
-print(best.winner, best.applied)
+from campaign import run_campaign
+plan = {"goal": "ship the attached Plan", "items": [...]}  # normalized Plan items
+result = run_campaign(
+    "/path/to/your/repo",
+    plan,
+    models={"builders": ["minimax", "luna"], "reviewer": "sol", "best_of_n": 2},
+)
+print(result.complete, result.total, result.progress)
 PY
 ```
 
@@ -161,7 +162,7 @@ A repo is **untrusted unless you pass `trusted=True`** — untrusted runs requir
 |---|---|
 | `.claude-plugin/` | the plugin + marketplace manifests (so `/plugin install` works) |
 | `skills/implement/SKILL.md` | the skill front-matter + the loop the running Claude/Codex session executes |
-| `skills/implement/references/` | phase-by-phase orchestration prose (intent, plan, review, draft-PR, handoff, guardrails, assembler) |
+| `skills/implement/references/` | campaign scheduling/repair plus single-item phase and guardrail references |
 | `skills/implement/scripts/` | the engine — see below; `smoke.py` verifies the harness offline or live |
 | `knowledge-base/` | `loop-techniques.md` (57 harvested techniques × 12 loop dimensions) + `model-priors.json`/`swe-benchmarks.md` (the router's seed) |
 | `docs/` | `design.md` (the spec) · `overview.html` (visual one-pager) |
@@ -171,6 +172,7 @@ The `skills/implement/scripts/` engine, by responsibility:
 
 | Area | Scripts |
 |---|---|
+| Multi-PR campaign | `campaign.py` |
 | Inner loop + gate | `execute.py`, `gate.py` (+ `adapters/`) |
 | Architect phases | `arch.py`, `intent.py`, `plan.py`, `oracle.py`, `review.py` |
 | GitHub PR | `gh.py`, `handoff.py`, `publish.py` |

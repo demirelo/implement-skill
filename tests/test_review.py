@@ -2,7 +2,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
 from review import (Finding, Loc, dedup, severity_tag,
-                    route_decision, re_gate, junit_executed_count)
+                    route_decision, re_gate, junit_executed_count,
+                    build_final_review_prompt, parse_final_review)
 from gate import detect_adapter
 from execute import _copy_repo
 
@@ -41,6 +42,7 @@ def test_dedup_keeps_location_less_findings_distinct():
 def test_severity_tag_table():
     assert severity_tag(_f("security", "gpt", "rce", objective=True, breaking="t")) == "blocker"
     assert severity_tag(_f("spec", "claude", "missing case", objective=True)) == "major"
+    assert severity_tag(_f("final", "sol", "regression", objective=True)) == "major"
     assert severity_tag(_f("simplicity", "glm", "rename", objective=False)) == "minor"
 
 
@@ -123,3 +125,32 @@ def test_re_gate_refuses_false_green_when_zero_executed():
     rg = re_gate(work, SKIP_ALL, adapter)
     assert rg.passed is False and rg.executed == 0
     assert "pytestmark" not in (Path(work) / "tests" / "test_ops.py").read_text()   # rolled back
+
+
+def test_final_reviewer_json_routes_objective_major():
+    rr = parse_final_review(
+        """{"approved": false, "summary": "fix it", "findings": [
+        {"title": "missing guard", "body": "bad input crashes", "file": "x.py", "line": 4,
+         "objective": true, "severity": "major", "verifiable": true}
+        ]}""",
+        "sol",
+    )
+    assert rr.decision == "route"
+    assert rr.routed[0].author == "sol" and rr.routed[0].title == "missing guard"
+
+
+def test_final_reviewer_invalid_output_never_approves():
+    rr = parse_final_review("looks fine to me", "sol")
+    assert rr.decision == "verify"
+    assert rr.escalated and "valid JSON" in rr.escalated[0].title
+
+
+def test_final_review_prompt_contains_single_reviewer_contract():
+    prompt = build_final_review_prompt(
+        item_title="A",
+        item_brief="Do A",
+        acceptance=("works",),
+        diff="--- a/x\n+++ b/x",
+    )
+    assert "sole final reviewer" in prompt
+    assert '"approved"' in prompt and "Candidate diff" in prompt

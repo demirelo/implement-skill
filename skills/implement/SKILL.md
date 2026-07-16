@@ -1,80 +1,157 @@
 ---
 name: implement
-description: Autonomous SWE loop. **Architects** (Claude · Codex · GLM) frame intent, plan, and write acceptance tests; **Builders** (DeepSeek · MiniMax · Kimi) implement against them; Architects adversarially review; on a fully-green result the loop opens a PR and merges it — falling back to a human handoff when review is uncertain or the gate is red. Use when the user wants a feature/fix built end-to-end into a reviewable (or auto-merged) PR.
+description: Execute an existing software implementation Plan as a dependency-aware campaign of isolated, parallel pull requests. Use when the user provides or attaches a Plan and chooses Builder models, one final Reviewer model, and optionally the Best-of-N width. Each Plan item becomes its own tested PR; independent items run concurrently by default; CI failures, review findings, and merge conflicts are repaired automatically before green-gated merge or handoff.
 ---
 
 # /implement
 
-The SWE door of the `/loop` engine. See `../../docs/design.md` for the full design and
-`../../knowledge-base/loop-techniques.md` for the technique library.
+Execute a supplied Plan. Do not redesign the requested scope unless the Plan is internally
+contradictory or cannot produce an objective verification gate.
 
-## The loop
-0. Intent (Architects ⇄ human) — pin the goal to acceptance criteria; human confirms. `intent.py` +
-   `arch.py`; no spend before confirm (`assert_spendable`). See `references/phase-0.md`. **Touchpoint #1.**
-1. Plan + tests (Architects consensus) — vertical-slice DAG + acceptance tests in the repo's language.
-   `plan.py` (consensus-by-exception) + `oracle.py` (RED + cross-reviewed, then immutable). See
-   `references/phase-1.md`. Plan-approval is off.
-2. Implement (Builders best-of-N) ⇄ local gates — inner loop to green (`execute.run_best_of_n`).
-3. Draft PR — commit + push the winner, open a draft (`publish.open_draft`). `gh.py` (forge I/O,
-   gh-only v1, clean seam) + scrubbed bodies. See `references/phase-3.md`.
-4. Review (Architects adversarial) ⇄ Builders fix — three lenses (spec/security/simplicity), route
-   objective findings back, re-gate the winner. `review.py`. See `references/phase-4.md`.
-5. Handoff — `publish.finalize`: 🟢/🟡/🔴 tier + structured body + curated comment. **Default
-   `autonomy: auto-merge`** merges the PR **only on 🟢** (acceptance green · winner re-gated · no
-   routed blockers · nothing escalated); 🟡/🔴 flip to ready-for-review for a human. Branch
-   protection is never bypassed. `handoff.py`. See `references/phase-5.md`.
+## Required input
 
-**One human touchpoint** on the clean path — confirm intent (0); the loop merges itself on green. A
-**second** touchpoint appears only when review is uncertain (🟡) or the gate is red (🔴), which
-fall back to a ready PR for the human. `autonomy: handoff` restores always-leave-a-PR.
+Accept only:
 
-## Setup (once)
-`python3 skills/implement/scripts/setup.py` — the interactive wizard provisions credentials your chosen way
-(1Password ref · env var · `.env` · macOS keychain; raw keys via a hidden prompt, never echoed),
-probes each with a 1-token check, and stores the model pool + Architects/Builders panels in
-`~/.config/implement/config.json`. The loop runs on a **Claude-only floor with zero external keys**
-(Opus Architect at `effort: "max"`, Sonnet/Haiku Builders); OpenRouter/Venice/Codex keys upgrade the panels.
-See `references/onboarding.md`.
+1. The Plan.
+2. A model configuration:
 
-Codex note: this same folder is a native Codex skill. Use `scripts/smoke.py` for an offline harness
-check, and `scripts/smoke.py --live` when you explicitly want to call configured external Builders.
-`team_dispatch.py` reads `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`/`MOONSHOT_API_KEY`,
-`OPENROUTER_API_KEY`, and `VENICE_API_KEY` first, then overlays your `~/.config/implement/config.json`
-credential refs (written by `setup.py`) over the tracked template before falling back to 1Password —
-so dispatch resolves the same credentials preflight validated. For unattended Codex app
-sessions, prefer `op://...` provider refs with `require_service_account: true` and the 1Password
-service-account token stored in macOS Keychain service `op-service-account-token`.
+```yaml
+builders: [model-a, model-b]
+reviewer: model-r
+best_of_n: 2
+```
 
-## Running
-`implement.run_implement(repo, task)` loads the stored profile (or `seed.default_profile` from the
-seed config), preflights the panels, and drives the live Builder panel through the v1 best-of-N loop.
-A confidential repo runs with `privacy=True` (Venice/e2ee lane only).
+`best_of_n` is optional and defaults to `2`. Require at least N configured Builder models. Preserve
+the user's Builder order and use exactly the first N configured models for every
+Best-of-N competition. Never add, replace, promote, or silently substitute a model. If a selected
+model is unavailable, report the blocked role and stop the affected workstream.
 
-**Codex/ChatGPT invariant (always):** every `mcp__codex__codex` call — the GPT Architect, in every
-phase — MUST pass `model: "gpt-5.6-sol"` and `config: {"model_reasoning_effort": "xhigh"}`. Never use any
-other model or a lower effort on the Codex/ChatGPT path.
+Do not ask the user to choose serial versus parallel execution. Parallel PR workstreams are the
+default. The user may explicitly request serial execution as an override (`parallel=False`).
 
-When external Builders are plain API calls, treat them as stateless compute rather than durable
-sessions: keep a standing local panel brief and review ledger, then dispatch concise deltas for
-related work. Use fresh stateless passes for PR review when independent eyes matter. See
-`references/panel-continuity.md`.
+## Normalize the Plan
 
-**Panel continuity is engine-wired** (`scripts/continuity.py`): if a panel exists for the repo
-(`~/.config/implement/panels/<slug>/`), `run_implement` auto-packs each Builder's slice (brief +
-invariants + its own ledger) into its prompts and records run/review outcomes back. Inspect with
-`/implement panel status`, curate with `panel record|brief|compact|reset`. Review prompts never
-receive panel state — record reviews only after the verdict.
+Before model spend, convert the Plan into PR-sized items with:
+
+- stable id and title;
+- self-contained scope;
+- observable acceptance criteria;
+- dependencies;
+- predicted touched files/modules;
+- test expectations.
+
+Use the codebase knowledge graph and repository memory when available. Inspect the implementation
+surface rather than asking the user for metadata that can be derived from the Plan and codebase.
+If predicted touched areas remain unknown, serialize those items conservatively.
+
+Every acceptance criterion must belong to exactly one item. Every item must be independently
+reviewable and must become exactly one PR.
+
+## Run the campaign
+
+Use `scripts/campaign.py:run_campaign`. The public programmatic shape is:
+
+```python
+run_campaign(
+    repo,
+    plan,
+    models={
+        "builders": ["model-a", "model-b"],
+        "reviewer": "model-r",
+        "best_of_n": 2,
+    },
+)
+```
+
+The coordinator must:
+
+1. Build dependency- and conflict-safe waves.
+2. Run every independent item in the current wave concurrently.
+3. Give each item a persistent branch and isolated PR worktree.
+4. Run the configured N Builders concurrently inside each item; select the smallest fully-green
+   candidate.
+5. Keep dependent items blocked until their prerequisite PR base is available.
+
+This yields two distinct concurrency levels:
+
+```text
+Campaign
+└── parallel independent PR workstreams
+    └── Best-of-N Builder candidates per PR item
+```
+
+Read `references/campaign.md` for scheduling, GitHub lifecycle, repair loops, and progress rules.
+
+## Per-item invariant
+
+Before starting an item:
+
+- fetch the latest remote base and branch from that remote ref;
+- inspect open PRs and remote branches for matching scope or touched files;
+- read panel memory for known issues, rejected approaches, and accepted decisions;
+- record the base SHA and overlap result in the PR notes.
+
+During implementation:
+
+- stay within the one-item scope;
+- add or update tests for every behavior change;
+- run focused tests while iterating and the complete relevant local gate before publication;
+- protect existing acceptance tests from weakening;
+- open a draft PR after the initial implementation and final-review pass are green.
+
+## Reviewer contract
+
+Use exactly the configured Reviewer model as a fresh, independent final reviewer. Do not give it
+Builder rationale or standing Builder ledger state before its verdict. Require structured findings
+covering correctness, security, regressions, test quality, and unnecessary complexity.
+
+Route objective blocking findings back to the configured Best-of-N Builders. Re-run local gates and
+the same fresh Reviewer after every code-changing repair. Invalid reviewer output never counts as
+approval.
+
+## Automatic repair
+
+Do not hand off a routine red state:
+
+- Failed CI: collect failed check logs, dispatch them to the configured Best-of-N Builders, apply
+  the smallest green repair, push, re-review, and rerun CI.
+- Merge conflicts: refresh the PR base, attempt a normal merge, dispatch unresolved conflict files
+  to the configured Best-of-N Builders, run gates, push, re-review, and rerun CI.
+- Review comments: inspect new actionable comments, route valid findings to the Builders, push
+  fixes, re-review, and rerun CI.
+
+Cap repeated repair loops and surface a named blocker only after the configured attempts are
+exhausted or the fix requires new product authority.
+
+## Ready and merge gate
+
+When the latest candidate is locally green, Reviewer-approved, conflict-free, and CI/security
+checks are green:
+
+- update the PR body and post the curated review record;
+- mark the PR ready;
+- assign it to the user;
+- auto-merge without bypassing branch protection when repository policy permits.
+
+Leave a ready PR instead of merging when required approvals or repository policy still block it.
+After confirmed merge, remove only that PR's worktree and local branch.
+
+## Reporting
+
+Keep small progress updates to one concise sentence. After each meaningful PR transition report:
+
+```text
+Campaign: X/Y items complete (Z%).
+```
+
+Count an item complete only when its PR is ready with all required gates satisfied or merged.
 
 ## References
-- `references/phase-0.md` — intent dialogue + the no-spend-before-confirm gate (touchpoint #1).
-- `references/phase-1.md` — plan consensus + the RED, cross-reviewed, immutable acceptance-test oracle.
-- `references/phase-4.md` — lens-diverse adversarial review + winner re-gate.
-- `references/phase-3.md` / `references/phase-5.md` — draft-PR creation and tiered ready-for-review handoff (`gh.py`/`publish.py`/`handoff.py`).
-- `references/guardrails.md` — safety gates: suitability · sandbox · destructive-command gating · worktree isolation · kill/stop-and-ask. Safe-by-default; `trusted=False` requires a sandbox.
-- `references/assembler.md` — learned router (`features`/`outcomes`/`router`: priors + local win-rates pick Builders per task, self-improving) + KB assembler (`kb.recipe` seeds loop composition).
-- `references/dispatch.md` — how Architects and Builders models are called.
-- `references/panel-continuity.md` — standing panel brief/ledger discipline for stateless external Builders.
-- `references/codebase-memory.md` — optional: use `codebase-memory-mcp` (if connected) for fast repo orientation and to assemble a focused Builder context (`run_best_of_n(..., repo_ctx=...)`) instead of the full-tree dump; falls back to Grep/Read.
-- `references/onboarding.md` — `/implement setup`: credentials, model pool, Architects/Builders panels (run once, stored).
-- `references/credentials.md` — credential-path strategy: tracked config is a template (placeholders only, guard-enforced); real keys resolve from env / `.env` / keychain / 1Password into `~/.config/implement/`, never the repo.
-- `scripts/` — the execution harness: `arch.py` (Architect spine), `intent.py`/`plan.py`/`oracle.py`/`review.py` (phase helpers), `execute.py` (v1 inner loop).
+
+- `references/campaign.md` — multi-PR scheduling, repair, GitHub, and cleanup rules.
+- `references/codebase-memory.md` — knowledge-graph orientation and focused model context.
+- `references/panel-continuity.md` — Builder memory and fresh-review separation.
+- `references/guardrails.md` — sandbox, oracle, command, worktree, and stop conditions.
+- `references/phase-1.md` — acceptance-test oracle rules.
+- `references/credentials.md` / `references/onboarding.md` — model pool and credential setup.
+- `scripts/implement.py` / `scripts/execute.py` — single-item Best-of-N primitive used by campaigns.

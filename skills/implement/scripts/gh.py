@@ -6,7 +6,9 @@ Hardening: option VALUES use `--flag=value` form and positional refs are validat
 LLM/plan-derived branch or a crafted `pr` arg beginning with `-` can never be parsed as a flag
 (argv option-injection). subprocess is always called with an argv list (no shell)."""
 import re
+import json
 import subprocess
+import time
 from dataclasses import dataclass
 
 
@@ -39,9 +41,17 @@ def _run(argv, repo, runner, *, stdin=None) -> str:
     return proc.stdout or ""
 
 
-def commit_and_push(repo, branch, message, *, sign=True, runner=subprocess.run) -> str:
+def commit_and_push(repo, branch, message, *, sign=True, checkout=True,
+                    runner=subprocess.run) -> str:
     _validate_ref(branch, "branch")  # the branch is cut from HEAD (assumed the base)
-    _run(["git", "checkout", "-b", branch], repo, runner)
+    if checkout:
+        _run(["git", "checkout", "-b", branch], repo, runner)
+    else:
+        current = _run(["git", "branch", "--show-current"], repo, runner).strip()
+        if current != branch:
+            raise ForgeError(
+                f"worktree branch mismatch: expected {branch!r}, found {current!r}"
+            )
     _run(["git", "add", "-A"], repo, runner)
     commit = ["git"]
     if not sign:
@@ -82,6 +92,157 @@ def mark_ready(repo, pr, *, runner=subprocess.run) -> None:
 
 def update_body(repo, pr, body, *, runner=subprocess.run) -> None:
     _run(["gh", "pr", "edit", _pr_arg(pr), "--body-file=-"], repo, runner, stdin=body)
+
+
+def assign_pr(repo, pr, assignee="@me", *, runner=subprocess.run) -> None:
+    if not assignee or str(assignee).startswith("-"):
+        raise ForgeError(f"unsafe assignee: {assignee!r}")
+    _run(["gh", "pr", "edit", _pr_arg(pr), f"--add-assignee={assignee}"], repo, runner)
+
+
+def list_open_prs(repo, *, runner=subprocess.run) -> list:
+    out = _run(
+        ["gh", "pr", "list", "--state=open",
+         "--json=number,title,url,headRefName,baseRefName"],
+        repo, runner,
+    )
+    try:
+        rows = json.loads(out or "[]")
+    except json.JSONDecodeError as exc:
+        raise ForgeError(f"could not parse open PRs: {exc}") from exc
+    return rows if isinstance(rows, list) else []
+
+
+def pr_files(repo, pr, *, runner=subprocess.run) -> list[str]:
+    out = _run(["gh", "pr", "view", _pr_arg(pr), "--json=files"], repo, runner)
+    try:
+        data = json.loads(out or "{}")
+    except json.JSONDecodeError as exc:
+        raise ForgeError(f"could not parse PR files: {exc}") from exc
+    files = data.get("files", []) if isinstance(data, dict) else []
+    return [str(x.get("path", "")) for x in files if isinstance(x, dict) and x.get("path")]
+
+
+def pr_checks(repo, pr, *, runner=subprocess.run) -> list:
+    out = _run(
+        ["gh", "pr", "checks", _pr_arg(pr), "--json=name,state,bucket,link,workflow"],
+        repo, runner,
+    )
+    try:
+        rows = json.loads(out or "[]")
+    except json.JSONDecodeError as exc:
+        raise ForgeError(f"could not parse PR checks: {exc}") from exc
+    return rows if isinstance(rows, list) else []
+
+
+def checks_green(rows) -> bool:
+    if not rows:
+        return False
+    success = {"SUCCESS", "PASS", "PASSED", "SKIPPED", "NEUTRAL"}
+    valid = [row for row in rows if isinstance(row, dict)]
+    if not valid:
+        return False
+    return all(
+        str(row.get("state") or row.get("bucket") or "").upper() in success
+        for row in valid
+    )
+
+
+def checks_failed(rows) -> bool:
+    failed = {"FAILURE", "FAILED", "CANCELLED", "CANCELED", "ERROR", "ACTION_REQUIRED"}
+    return any(
+        str(row.get("state") or row.get("bucket") or "").upper() in failed
+        for row in rows
+        if isinstance(row, dict)
+    )
+
+
+def wait_for_checks(repo, pr, *, max_polls=60, interval=10,
+                    runner=subprocess.run, sleep_fn=time.sleep) -> list:
+    last = []
+    for poll in range(max(int(max_polls), 1)):
+        last = pr_checks(repo, pr, runner=runner)
+        if checks_green(last):
+            return last
+        if checks_failed(last):
+            raise ForgeError("one or more PR checks failed")
+        if poll + 1 < max_polls:
+            sleep_fn(interval)
+    raise ForgeError("timed out waiting for PR checks")
+
+
+def failed_check_logs(repo, rows, *, runner=subprocess.run) -> str:
+    """Collect actionable logs for failed checks without failing if one provider omits them."""
+    blocks = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        state = str(row.get("state") or row.get("bucket") or "").upper()
+        if state not in {"FAILURE", "FAILED", "CANCELLED", "CANCELED", "ERROR", "ACTION_REQUIRED"}:
+            continue
+        name = str(row.get("name") or row.get("workflow") or "unnamed check")
+        link = str(row.get("link") or "").strip()
+        detail = ""
+        if link:
+            try:
+                detail = _run(["gh", "run", "view", link, "--log-failed"], repo, runner)
+            except ForgeError as exc:
+                detail = str(exc)
+        blocks.append(f"## {name}\n{detail or f'check state: {state}'}")
+    return "\n\n".join(blocks)
+
+
+def pr_status(repo, pr, *, runner=subprocess.run) -> dict:
+    out = _run(
+        ["gh", "pr", "view", _pr_arg(pr),
+         "--json=mergeable,mergeStateStatus,baseRefName,headRefName,isDraft"],
+        repo, runner,
+    )
+    try:
+        data = json.loads(out or "{}")
+    except json.JSONDecodeError as exc:
+        raise ForgeError(f"could not parse PR status: {exc}") from exc
+    return data if isinstance(data, dict) else {}
+
+
+def has_merge_conflict(status) -> bool:
+    mergeable = str(status.get("mergeable", "")).upper()
+    state = str(status.get("mergeStateStatus", "")).upper()
+    return mergeable == "CONFLICTING" or state in {"DIRTY", "CONFLICTING"}
+
+
+def pr_feedback(repo, pr, *, runner=subprocess.run) -> dict:
+    out = _run(
+        ["gh", "pr", "view", _pr_arg(pr), "--json=reviewDecision,reviews,comments"],
+        repo,
+        runner,
+    )
+    try:
+        data = json.loads(out or "{}")
+    except json.JSONDecodeError as exc:
+        raise ForgeError(f"could not parse PR feedback: {exc}") from exc
+    return data if isinstance(data, dict) else {}
+
+
+def new_feedback_messages(data, seen=None) -> tuple[list[str], set[str]]:
+    seen_ids = set(seen or ())
+    messages = []
+    for kind in ("reviews", "comments"):
+        rows = data.get(kind, []) if isinstance(data, dict) else []
+        for i, row in enumerate(rows if isinstance(rows, list) else []):
+            if not isinstance(row, dict):
+                continue
+            ident = str(row.get("id") or f"{kind}-{i}-{row.get('createdAt', '')}")
+            if ident in seen_ids:
+                continue
+            seen_ids.add(ident)
+            body = str(row.get("body") or "").strip()
+            state = str(row.get("state") or "").strip()
+            author = row.get("author") or {}
+            login = author.get("login", "") if isinstance(author, dict) else str(author)
+            if body:
+                messages.append(f"{kind[:-1]} by {login or 'unknown'} [{state or 'comment'}]: {body}")
+    return messages, seen_ids
 
 
 _MERGE_FLAG = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}

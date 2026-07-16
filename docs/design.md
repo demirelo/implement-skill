@@ -4,6 +4,12 @@
 **Author:** PI (Opus 4.8) with the user
 **Companion:** [`knowledge-base/loop-techniques.md`](../knowledge-base/loop-techniques.md) (the harvested resource)
 
+> **Campaign extension (2026-07-16):** the public `/implement` contract now accepts an existing Plan
+> plus explicit Builder/Reviewer model choices and runs one isolated PR per Plan item. Independent
+> items run in parallel by default; Best-of-N defaults to 2; CI failures and merge conflicts repair
+> automatically. See [`skills/implement/references/campaign.md`](../skills/implement/references/campaign.md).
+> The single-PR loop below remains the per-item primitive.
+
 ## 1. Vision
 
 Generalize `/solve` (a multi-model adversarial *research* lab) into a **domain-agnostic autonomous

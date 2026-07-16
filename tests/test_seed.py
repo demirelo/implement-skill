@@ -22,6 +22,7 @@ def test_default_profile_maps_backends_and_panels():
     assert p["pool"]["deepseek"]["backend"] == "team_dispatch"
     assert p["panels"]["architects"] == ["claude", "glm"]
     assert p["panels"]["builders"] == ["deepseek"]
+    assert p["prefs"]["best_of_n"] == 2
 
 
 def test_default_profile_preserves_opus_effort():
@@ -41,6 +42,21 @@ def test_default_profile_routes_glm_private_via_venice():
     assert glm["data"] == "private" and glm["route"] == "direct" and glm["cred_provider"] == "venice"
     ds = p["pool"]["deepseek"]
     assert ds["data"] == "standard" and ds["route"] == "openrouter" and ds["cred_provider"] == "openrouter"
+
+
+def test_default_profile_preserves_team_dispatch_model_override():
+    models = {
+        "architects": {},
+        "builders": {
+            "custom": {
+                "via": "team_dispatch",
+                "provider": "openrouter",
+                "model": "vendor/custom-model",
+            },
+        },
+    }
+    custom = default_profile(models, {})["pool"]["custom"]
+    assert custom["model"] == "vendor/custom-model"
 
 
 def test_default_profile_credentials_reference_op_refs():

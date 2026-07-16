@@ -212,3 +212,60 @@ def test_run_implement_stateless_when_no_panel(tmp_path, monkeypatch):
     assert best.applied is True
     assert all("Standing panel context" not in p for p in prompts)
     assert continuity.exists(work, home=home) is False            # no state spawned uninvited
+
+
+def test_run_implement_explicit_models_use_exact_best_of_n_width(tmp_path, monkeypatch):
+    from execute import _copy_repo
+    import implement
+    monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
+    work = _copy_repo(FIXTURE)
+    seen = []
+    profile = {
+        "pool": {},
+        "panels": {"architects": [], "builders": []},
+        "credentials": {},
+        "prefs": {},
+    }
+
+    def make(name):
+        def dispatch(_prompt):
+            seen.append(name)
+            return MULTIPLY_FIX
+        return dispatch
+
+    best = run_implement(
+        work,
+        "add multiply()",
+        profile=profile,
+        trusted=True,
+        builders=["a", "b", "c"],
+        best_of_n=2,
+        dispatcher_overrides={"a": make("a"), "b": make("b"), "c": make("c")},
+        ledger_path=str(tmp_path / "led.jsonl"),
+    )
+    assert best.applied is True
+    assert set(seen) == {"a", "b"}
+    assert "c" not in best.candidates
+
+
+def test_run_implement_explicit_best_of_n_requires_enough_models(monkeypatch):
+    import pytest
+    import implement
+    from execute import _copy_repo
+    monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
+    profile = {
+        "pool": {},
+        "panels": {"architects": [], "builders": []},
+        "credentials": {},
+        "prefs": {},
+    }
+    with pytest.raises(RuntimeError, match="requires at least 2"):
+        run_implement(
+            _copy_repo(FIXTURE),
+            "x",
+            profile=profile,
+            trusted=True,
+            builders=["a"],
+            best_of_n=2,
+            dispatcher_overrides={"a": lambda _p: MULTIPLY_FIX},
+        )
