@@ -41,7 +41,7 @@
 
   "openrouter": {
     "base_url": "https://openrouter.ai/api/v1",
-    "model": "moonshotai/kimi-k2.7-code",
+    "model": "~x-ai/grok-latest",
     "account": "<your-1password-account>",
     "key_ref": "op://<vault>/openrouter-api-key/credential",
     "service_account_keychain_service": "op-service-account-token",

@@ -89,7 +89,8 @@ def _reset(repo_path) -> None:
 
 
 def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, secrets=None,
-                   wrap=None, crit=None, panel_context="", repo_ctx=None) -> LoopResult:
+                   wrap=None, crit=None, panel_context="", repo_ctx=None,
+                   force_turn=False) -> LoopResult:
     secrets = env_secrets() if secrets is None else secrets
     # command-layer gate: refuse a destructive harness command (adapter test_cmd) before running it
     if not guard.classify(shlex.split(adapter["test_cmd"])).safe:
@@ -102,9 +103,12 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
     turns_log: list = []   # structured, fed to kill.should_stop
     gate_result = run_gate(repo_path, adapter, wrap=wrap)   # turn 0: FULL suite — establishes the oracle
     if gate_result.passed:   # H5: a "green" with 0 executed tests is a false green (no oracle), not success
-        if gate_result.passing_count > 0:
+        if gate_result.passing_count > 0 and not force_turn:
             return LoopResult(success=True, turns=0)
-        return LoopResult(success=False, turns=0, error="vacuous green: 0 tests executed")
+        if gate_result.passing_count == 0:
+            return LoopResult(success=False, turns=0, error="vacuous green: 0 tests executed")
+        # Review-fix passes start from a green tree but still require a Builder-authored delta.
+        # The task brief carries the routed findings; the full gate below verifies the fix.
     # #4 two-tier gate: iterate against just the failing set (fast), confirm green on the FULL suite.
     # `failing` is the current target; scoping is only possible with an adapter test_one + known ids.
     failing = list(gate_result.failing_tests)
@@ -168,7 +172,8 @@ def _diff_size(diff) -> int:
 
 
 def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secrets=None,
-                  wrap=None, crit=None, panel_context=None, repo_ctx=None) -> BestResult:
+                  wrap=None, crit=None, panel_context=None, repo_ctx=None,
+                  force_turn=False) -> BestResult:
     secrets = env_secrets() if secrets is None else secrets
     panel_context = panel_context or {}
     # Each candidate competes in its OWN isolated copy of the repo, created + torn down inside its own
@@ -184,7 +189,7 @@ def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secr
         try:
             return run_inner_loop(work, task_brief, adapter, dispatchers[name], max_turns, secrets,
                                   wrap=wrap, crit=crit, panel_context=panel_context.get(name, ""),
-                                  repo_ctx=repo_ctx)
+                                  repo_ctx=repo_ctx, force_turn=force_turn)
         finally:
             shutil.rmtree(Path(work).parent, ignore_errors=True)
 

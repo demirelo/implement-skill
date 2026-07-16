@@ -10,6 +10,7 @@ CATALOG = {
     "glm":      ("architects", "zai",       "private"),
     "sonnet":   ("builders",   "anthropic", "standard"),
     "haiku":    ("builders",   "anthropic", "standard"),
+    "grok":     ("builders",   "x-ai",      "standard"),
     "deepseek": ("builders",   "deepseek",  "standard"),
     "minimax":  ("builders",   "minimax",   "standard"),
     "kimi":     ("builders",   "moonshot",  "standard"),
@@ -22,12 +23,11 @@ CATALOG = {
 # what people actually run and talk to. GLM-5.2 holds the strong third / diversity + privacy-capable
 # seat (it is the best OPEN model, but not the interactive surface).
 _ARCH_PRIORITY = ["claude", "gpt", "glm"]
-# Builders ordered by the measured benchmark routing (knowledge-base/swe-benchmarks.md, anchored on the
-# contamination-resistant boards — SWE-bench Pro / Terminal-Bench 2.0 / GDPval, NOT the saturated
-# Verified): top open agentic (deepseek, minimax) -> strong general/edits builder (sonnet, also the
-# credential-free floor) -> kimi -> the Venice e2ee privacy lane (GLM-5.2 first, the #1 open builder)
-# -> haiku as the cheap last-resort floor.
-_BUILD_PRIORITY = ["deepseek", "minimax", "sonnet", "kimi",
+# Builders ordered by current Pareto routing. Grok (OpenRouter `~x-ai/grok-latest`) gets the first
+# standard Builder slot; MiniMax remains the lead non-Grok external Builder; DeepSeek/Kimi stay in
+# the panel but lower than Grok so the loop spends more attempts on the current Pareto choice.
+# Sonnet remains the credential-free floor; Venice e2ee stays the private lane.
+_BUILD_PRIORITY = ["grok", "minimax", "deepseek", "sonnet", "kimi",
                    "venice-glm", "venice-qwen", "venice-gpt-oss", "haiku"]
 
 

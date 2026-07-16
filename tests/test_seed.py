@@ -6,7 +6,8 @@ from seed import default_profile
 MODELS = {
     "architects": {"claude": {"via": "orchestrator", "model": "claude-opus-4-8"},
                    "glm": {"via": "team_dispatch", "provider": "glm", "effort": "high"}},
-    "builders": {"deepseek": {"via": "team_dispatch", "provider": "deepseek"}},
+    "builders": {"deepseek": {"via": "team_dispatch", "provider": "deepseek"},
+                 "grok": {"via": "team_dispatch", "provider": "grok", "model": "~x-ai/grok-latest", "effort": "high"}},
 }
 PROVIDERS = {
     "deepseek": {"account": "ACCT", "key_ref": "op://v/ds/credential"},
@@ -21,7 +22,8 @@ def test_default_profile_maps_backends_and_panels():
     assert p["pool"]["claude"]["backend"] == "claude_headless"
     assert p["pool"]["deepseek"]["backend"] == "team_dispatch"
     assert p["panels"]["architects"] == ["claude", "glm"]
-    assert p["panels"]["builders"] == ["deepseek"]
+    assert p["panels"]["builders"] == ["grok", "deepseek"]
+    assert p["prefs"]["best_of_n"] == 2
 
 
 def test_default_profile_preserves_opus_effort():
@@ -41,6 +43,9 @@ def test_default_profile_routes_glm_private_via_venice():
     assert glm["data"] == "private" and glm["route"] == "direct" and glm["cred_provider"] == "venice"
     ds = p["pool"]["deepseek"]
     assert ds["data"] == "standard" and ds["route"] == "openrouter" and ds["cred_provider"] == "openrouter"
+    grok = p["pool"]["grok"]
+    assert grok["data"] == "standard" and grok["route"] == "openrouter"
+    assert grok["cred_provider"] == "openrouter" and grok["model"] == "~x-ai/grok-latest"
 
 
 def test_default_profile_credentials_reference_op_refs():

@@ -25,6 +25,8 @@ numbers, and test names so details can be recovered without bloating every promp
 ## Stable Roles
 
 Use stable model roles across related work so feedback compounds:
+- Grok: current Pareto standard Builder for primary implementation candidates via OpenRouter
+  `~x-ai/grok-latest`.
 - MiniMax: lead Builder and integration-risk scout.
 - DeepSeek: correctness, edge cases, and test depth.
 - Kimi: security, auth, request-body, and data-integrity scrutiny.

@@ -83,10 +83,10 @@ def interactive_setup(input_fn=input, getpass_fn=None, runner=subprocess.run, en
     creds: dict = detect_env_credentials(env)
     if creds:
         print(f"Detected env credentials for: {sorted(creds)}")
-    print("Configure external providers (blank to stop). Venice = privacy lane (e2ee).")
+    print("Configure external providers (blank to stop). OpenRouter enables Grok (`~x-ai/grok-latest`); Venice = privacy lane (e2ee).")
     while True:
         provider = input_fn(
-            "Provider to add (openrouter/venice/deepseek/minimax/kimi, blank=done): ").strip()
+            "Provider to add (openrouter=grok/venice/deepseek/minimax/kimi, blank=done): ").strip()
         if not provider:
             break
         method = input_fn(f"How will you pass {provider}'s key? ({'/'.join(_METHODS)}): ").strip()

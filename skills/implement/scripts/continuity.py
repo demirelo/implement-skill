@@ -26,6 +26,7 @@ EVENT_TYPES = {"decision", "rejected", "invariant", "review", "provider_note",
 
 # Stable roles (references/panel-continuity.md §Stable Roles) so feedback compounds per model.
 ROLES = {
+    "grok": "current Pareto standard Builder for primary implementation candidates",
     "minimax": "lead Builder and integration-risk scout",
     "deepseek": "correctness, edge cases, and test depth",
     "kimi": "security, auth, request-body, and data-integrity scrutiny",

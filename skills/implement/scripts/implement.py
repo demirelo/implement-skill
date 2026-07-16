@@ -39,9 +39,25 @@ def _load_priors() -> dict:
 
 def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
                   privacy=False, runner=subprocess.run, env=None, max_turns=6, trusted=False,
-                  ledger_path=None):
+                  ledger_path=None, builders=None, dispatcher_overrides=None,
+                  force_turn=False, repo_ctx=None, best_of_n=None):
     if profile is None:
         profile = load_profile(start=start, home=home) or default_profile(_MODELS, _PROVIDERS)
+    dispatcher_overrides = dispatcher_overrides or {}
+    if builders is not None:
+        requested = list(dict.fromkeys(builders))
+        if not requested:
+            raise ValueError("builders must contain at least one configured model")
+        missing = [
+            m for m in requested
+            if m not in profile.get("pool", {}) and m not in dispatcher_overrides
+        ]
+        if missing:
+            raise ValueError(f"unknown Builder model(s): {missing}")
+        profile = dict(profile)
+        panels = dict(profile.get("panels", {}))
+        panels["builders"] = requested
+        profile["panels"] = panels
     if privacy or profile.get("prefs", {}).get("privacy_default"):
         profile, privacy = enforce_privacy(profile), True
     adapter = detect_adapter(repo_path)
@@ -71,15 +87,37 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
 
     ledger_path = ledger_path or outcomes.default_path(home=home)
     bucket = features.bucket(task_brief, adapter)
-    live_builders = [m for m in panels.get("builders", []) if live.get(m)]
-    if len(live_builders) > 1:   # M5: rank by (priors + local outcomes) and take the best-of-N top-k
+    requested_builders = list(panels.get("builders", []))
+    live_builders = [m for m in requested_builders if live.get(m) or m in dispatcher_overrides]
+    if builders is not None:
+        unavailable = [m for m in requested_builders if m not in live_builders]
+        if unavailable:
+            raise RuntimeError(
+                f"configured Builder model(s) unavailable: {unavailable}; "
+                "the campaign never substitutes models silently"
+            )
+        width = 2 if best_of_n is None else int(best_of_n)
+        if width < 1:
+            raise ValueError("best_of_n must be at least 1")
+        if len(live_builders) < width:
+            raise RuntimeError(
+                f"best_of_n={width} requires at least {width} available configured Builders; "
+                f"got {len(live_builders)}"
+            )
+        live_builders = live_builders[:width]
+    elif len(live_builders) > 1:   # M5: rank defaults; explicit campaign roles preserve user order
         ranked = router.rank(bucket, live_builders, _load_priors(),
                              outcomes.tally(outcomes.load(ledger_path)), alias=_PRIOR_ALIAS)
-        top_k = max(int(prefs.get("best_of_n", 3)), 1)
+        top_k = max(int(best_of_n if best_of_n is not None else prefs.get("best_of_n", 2)), 1)
         live_builders = [m for m, _ in ranked][:top_k]
 
-    dispatchers = {m: _dispatcher(m) for m in live_builders}
-    if not dispatchers:  # floor: no live Builder -> promote a live Architect that can build
+    dispatchers = {}
+    for model in live_builders:
+        if model in dispatcher_overrides:
+            dispatchers[model] = dispatcher_overrides[model]
+        else:
+            dispatchers[model] = _dispatcher(model)
+    if not dispatchers and builders is None:  # default floor only; explicit roles never substitute
         for m in panels.get("architects", []):
             if live.get(m):
                 try:
@@ -96,7 +134,8 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
         panel_ctx = {m: continuity.pack(repo_path, m, home=home) for m in dispatchers}
     best = run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=max_turns,
                          wrap=_wrap, crit=KillCriteria(max_turns=max_turns),
-                         panel_context=panel_ctx)
+                         panel_context=panel_ctx, repo_ctx=repo_ctx,
+                         force_turn=force_turn)
     outcomes.log_run(best, bucket, list(dispatchers), path=ledger_path)   # learn from this run
     if panel_ctx is not None:
         continuity.record_run(repo_path, best, bucket, list(dispatchers), home=home)

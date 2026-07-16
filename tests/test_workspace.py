@@ -3,7 +3,15 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
 import pytest
-from workspace import create_worktree, reset_worktree, remove_worktree, repo_context, WorkspaceError
+from workspace import (
+    create_worktree,
+    create_branch_worktree,
+    reset_worktree,
+    remove_worktree,
+    remove_merged_worktree,
+    repo_context,
+    WorkspaceError,
+)
 
 
 def _git_repo(tmp_path):
@@ -55,3 +63,26 @@ def test_repo_context_tracked_only_and_scrubs(tmp_path):
     assert "def f()" in ctx                                                   # tracked source present
     assert "HEAVY" not in ctx and "LEAKED" not in ctx                        # untracked excluded
     assert "sk-abcdefghijklmnopqrstuvwxyz0123" not in ctx and "***" in ctx   # tracked secret scrubbed
+
+
+def test_persistent_pr_worktree_owns_branch_until_confirmed_merge(tmp_path):
+    repo = _git_repo(tmp_path)
+    wt = create_branch_worktree(str(repo), "item-a", "implement/item-a", base="HEAD")
+    branch = sp.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert branch == "implement/item-a"
+    remove_merged_worktree(str(repo), wt, "implement/item-a")
+    assert not Path(wt).exists()
+    branches = sp.run(
+        ["git", "branch", "--list", "implement/item-a"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert branches.strip() == ""

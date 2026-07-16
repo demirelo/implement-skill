@@ -21,8 +21,9 @@ The token is passed only to the child `op read` subprocess.
    `require_service_account: true`. Highlight **Venice = privacy lane** (e2ee) for confidential repos.
 3. **Validate** each with a real 1-token probe — `preflight.readiness(profile, probe=True)` runs
    `resolvers.validate(backends.probe_argv(entry))` and drops present-but-dead keys at setup, not mid-loop.
-4. **Compose panels** with `panel.default_panels(available)` as the editable default (the ladder:
-   open cross-vendor Builders preferred, Claude-only floor → Sonnet/Haiku); the user confirms.
+4. **Compose the available model pool** with `panel.default_panels(available)` as a setup-time
+   fallback. A campaign's explicit `builders` and `reviewer` choices override these role defaults;
+   setup never substitutes for per-run role selection.
 5. **Store** with `profile.save_profile(cfg, scope=...)`. Ensure `.gitignore` covers `.implement/`
    and `.env`.
 
@@ -38,8 +39,19 @@ interactive/local use.
 SOURCE declarations, composes the panels, probes them, and saves the profile.
 
 ## Per run
-`implement.run_implement(repo, task)` loads the stored profile (or `seed.default_profile` from the
-seed config), runs `preflight.readiness` (non-secret table: model · role · live · source), binds the
-live Builders with `backends.make_dispatcher`, and drives the v1 loop. A confidential repo applies
-`preflight.enforce_privacy` first; if the private lane has no Builder, a live private Architect is
-promoted to build.
+
+For a Plan campaign, call:
+
+```python
+campaign.run_campaign(
+    repo,
+    plan,
+    models={"builders": ["a", "b"], "reviewer": "r", "best_of_n": 2},
+)
+```
+
+The explicit role choices are authoritative. Preflight verifies every selected model; an unavailable
+model blocks the affected workstream instead of triggering silent promotion or substitution.
+`implement.run_implement(repo, task)` remains the single-item Best-of-N primitive used internally.
+A confidential repo applies `preflight.enforce_privacy`; all explicitly selected models must satisfy
+the privacy lane.

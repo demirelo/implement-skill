@@ -42,6 +42,10 @@ weights: `venice-glm` ↔ `glm` (folded into the `glm` row), while `venice-qwen`
 
 ## Verified routing (supersedes the cold-start ratings for coding domains)
 
+**2026-07-08 override:** OpenRouter Grok (`grok` / `~x-ai/grok-latest`) is the current Pareto
+standard Builder. Put it in the first standard Builder slot ahead of DeepSeek/Kimi, while local
+outcome-learning remains authoritative if observed green-diff rates disagree.
+
 | Need | Use (in order) | Why (measured) |
 |---|---|---|
 | **Architects** (intent/plan/oracle/review) | Opus 4.8 · GPT-5.5 xhigh · GLM-5.2 | top Intelligence Index (56 / 55 / 51-best-open) |

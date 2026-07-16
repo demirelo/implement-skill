@@ -6,7 +6,7 @@ from config import architects, builders
 
 def test_builders_include_open_models_and_a_free_floor():
     b = set(builders())
-    assert {"deepseek", "minimax", "kimi"} <= b   # open cross-vendor Builders
+    assert {"grok", "deepseek", "minimax", "kimi"} <= b   # cross-vendor Builders
     assert {"sonnet", "haiku"} <= b               # credential-free Claude floor (zero external keys)
 
 

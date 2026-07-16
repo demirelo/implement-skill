@@ -7,6 +7,7 @@
   "builders": {
     "sonnet":   {"via": "claude_headless", "model": "claude-sonnet-4-6"},
     "haiku":    {"via": "claude_headless", "model": "claude-haiku-4-5"},
+    "grok":     {"via": "team_dispatch", "provider": "grok", "model": "~x-ai/grok-latest", "effort": "high"},
     "deepseek": {"via": "team_dispatch", "provider": "deepseek"},
     "minimax":  {"via": "team_dispatch", "provider": "minimax"},
     "kimi":     {"via": "team_dispatch", "provider": "kimi"},

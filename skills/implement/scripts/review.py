@@ -2,6 +2,7 @@
 are deduped by location, severity-tagged, and either routed back to Builders (objective
 blocker/major) or kept advisory. re_gate (H4) confirms the materialized winner is still green on a
 clean baseline; junit_executed_count (H5) refuses a false green where nothing actually ran."""
+import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -46,6 +47,99 @@ class ReGate:
     summary: str = ""
 
 
+def build_final_review_prompt(*, item_title, item_brief, acceptance, diff) -> str:
+    criteria = "\n".join(f"- {x}" for x in acceptance) or "- Satisfy the Plan item as written."
+    return (
+        "Review this implementation candidate as the sole final reviewer. Check correctness, "
+        "security, regressions, test quality, and unnecessary complexity. Return JSON only.\n\n"
+        f"Plan item: {item_title}\n\n"
+        f"Scope:\n{item_brief}\n\n"
+        f"Acceptance:\n{criteria}\n\n"
+        "Candidate diff:\n"
+        f"{diff}\n\n"
+        "Schema:\n"
+        '{"approved": true, "summary": "short verdict", "findings": ['
+        '{"title": "actionable finding", "body": "why it matters", "file": "path", '
+        '"line": 1, "objective": true, "severity": "blocker|major|minor", '
+        '"verifiable": true, "breaking_test": null}]}'
+    )
+
+
+def _json_object(text: str) -> dict | None:
+    if not text:
+        return None
+    fence = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
+    candidates = [fence.group(1)] if fence else []
+    candidates.append(text)
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        start = candidate.find("{")
+        while start != -1:
+            try:
+                obj, _ = decoder.raw_decode(candidate[start:])
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                pass
+            start = candidate.find("{", start + 1)
+    return None
+
+
+def parse_final_review(text: str, reviewer: str) -> ReviewRound:
+    """Convert the selected reviewer's JSON verdict into the normal routing shape.
+
+    Invalid or non-actionable withheld approvals become unverifiable escalations, so malformed
+    reviewer output can never accidentally satisfy the merge gate.
+    """
+    data = _json_object(text)
+    if data is None:
+        finding = Finding(
+            lens="final",
+            author=reviewer,
+            title="Reviewer response was not valid JSON",
+            body="The final review could not be parsed; obtain a fresh verdict.",
+            objective=False,
+            verifiable=False,
+        )
+        return route_decision([finding])
+
+    findings = []
+    for raw in data.get("findings", []) if isinstance(data.get("findings", []), list) else []:
+        if not isinstance(raw, dict) or not str(raw.get("title", "")).strip():
+            continue
+        file = str(raw.get("file", "")).strip()
+        try:
+            line = max(int(raw.get("line", 0) or 0), 0)
+        except (TypeError, ValueError):
+            line = 0
+        locations = (Loc(file=file, line=line),) if file else ()
+        findings.append(Finding(
+            lens="final",
+            author=reviewer,
+            title=str(raw["title"]).strip(),
+            body=str(raw.get("body", "")).strip(),
+            locations=locations,
+            objective=bool(raw.get("objective", False)),
+            breaking_test=raw.get("breaking_test") or None,
+            severity=str(raw.get("severity", "")).lower(),
+            verifiable=bool(raw.get("verifiable", True)),
+        ))
+
+    rr = route_decision(findings)
+    approved = data.get("approved") is True
+    if approved or rr.routed or rr.escalated:
+        return rr
+    withheld = Finding(
+        lens="final",
+        author=reviewer,
+        title="Reviewer withheld approval without an actionable finding",
+        body=str(data.get("summary", "")).strip(),
+        objective=False,
+        verifiable=False,
+    )
+    return route_decision([*findings, withheld])
+
+
 def _loc_key(f: Finding):
     return tuple(sorted((loc.file, loc.line) for loc in f.locations))
 
@@ -76,6 +170,10 @@ def dedup(findings) -> list:
 
 def severity_tag(finding) -> str:
     lenses = finding.lens.split("+")
+    if "final" in lenses and finding.objective and finding.breaking_test:
+        return "blocker"
+    if "final" in lenses and finding.objective:
+        return "major"
     if "security" in lenses and finding.objective and finding.breaking_test:
         return "blocker"
     if finding.objective and ("spec" in lenses or "security" in lenses):

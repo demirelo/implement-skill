@@ -28,6 +28,12 @@
         "evidence": "OpenAI's GPT-5 line (GPT-5 / GPT-5-Codex, ~Aug-Sep 2025) is a frontier coding tier with top SWE-bench Verified (~70s%) and strong LiveCodeBench/competitive-programming results; GPT-5-Codex with high reasoning effort is a leading agentic coder. GPT-5.5 is an incremental successor (the skill runs it at effort=xhigh via codex_mcp as an Architect). No independently verified 5.5-specific public benchmark in my data, so medium confidence on the exact placement, but family priors put it strong for general-coding. Behavioral: very strong at hard reasoning/algorithmic tasks; verbose; occasionally over-engineers small fixes.",
         "post_cutoff": true
       },
+      "grok": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Grok via OpenRouter model `~x-ai/grok-latest` is treated as the current Pareto standard Builder for implementation candidates. Prefer it ahead of DeepSeek/Kimi on standard-data tasks, then let local outcome-learning override if repo-specific win rates disagree.",
+        "post_cutoff": true
+      },
       "deepseek": {
         "rating": "strong",
         "confidence": "high",
@@ -88,6 +94,12 @@
         "rating": "strong",
         "confidence": "high",
         "evidence": "OpenAI frontier Architect-tier line. The GPT-5 family established top-tier AIME (high pass@1 with tools/reasoning), MATH, and LiveCodeBench/Codeforces-style performance; GPT-5.5 is its successor and should sit at or above that on algorithmic-math, historically among the very strongest on competition math and reasoning. Behaviorally excellent at long multi-step derivations. Exact 5.5 leaderboard numbers are recent/thin and should be verified.",
+        "post_cutoff": true
+      },
+      "grok": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Grok via OpenRouter model `~x-ai/grok-latest` is the current Pareto standard Builder. Use it as a top candidate for algorithmic/correctness-heavy patches before DeepSeek/Kimi unless local outcomes demote it.",
         "post_cutoff": true
       },
       "deepseek": {
@@ -152,6 +164,12 @@
         "evidence": "GPT-5 family (and Codex variants) are frontier on SWE-bench Verified (~70-75% range reported through 2025) and very strong on LiveCodeBench and Aider polyglot; excellent at TS type-level reasoning and browser-API correctness. On WebDev/DesignArena human-preference for raw UI aesthetics, GPT-5-class has historically been competitive-but-sometimes-behind Claude, though gap is small and task-dependent. GPT-5.5 specifically is at/just-around my cutoff — I infer 'strong' from the 5.x trajectory but haven't seen stable GPT-5.5 leaderboard numbers, hence medium confidence. Architect-tier cost.",
         "post_cutoff": true
       },
+      "grok": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Grok via OpenRouter model `~x-ai/grok-latest` is the current Pareto standard Builder. Use it as the first external Builder for frontend code edits; keep Sonnet/GLM around for visual/style diversity and privacy-lane work.",
+        "post_cutoff": true
+      },
       "deepseek": {
         "rating": "moderate",
         "confidence": "high",
@@ -212,6 +230,12 @@
         "rating": "moderate",
         "confidence": "high",
         "evidence": "GPT-5 / GPT-5-Codex (2025) posted frontier SWE-bench Verified (~72-75%), top-tier LiveCodeBench and competitive-programming/AIME results, and strong agentic terminal performance via Codex; at xhigh reasoning effort it is a leading architect-class model for systems design, algorithms, and performance reasoning. GPT-5.5 is the unreleased-in-my-data successor; family trajectory supports strong, but exact 5.5 numbers are not in training data — verify.",
+        "post_cutoff": true
+      },
+      "grok": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Grok via OpenRouter model `~x-ai/grok-latest` is the current Pareto standard Builder. Prefer it for systems-backend implementation candidates before DeepSeek/Kimi unless local outcome history demotes it.",
         "post_cutoff": true
       },
       "deepseek": {
@@ -276,6 +300,12 @@
         "evidence": "GPT-5.x (OpenAI) is a frontier line that trades blows with Opus on SWE-bench Verified, LiveCodeBench, and AIME/math; at xhigh reasoning effort it is excellent at hard, well-specified coding and security analysis. Strong prior for Solidity Architect work. Confidence is medium not high because GPT-5.5 specifically may be a point release at/near my cutoff and I lack a NAMED Solidity benchmark for it; the 5.x family trajectory is well-established but the exact 5.5 placement should be verified. Known behavioral note: GPT-5 line is strong at spec-following and adversarial reasoning, occasionally verbose/over-engineering in agentic diffs.",
         "post_cutoff": false
       },
+      "grok": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Grok via OpenRouter model `~x-ai/grok-latest` is the current Pareto standard Builder. Use it as a primary implementation candidate for smart-contract patches, with GPT/Claude still preferred for final adversarial security review and local Foundry results overriding priors.",
+        "post_cutoff": true
+      },
       "deepseek": {
         "rating": "moderate",
         "confidence": "low",
@@ -338,6 +368,12 @@
         "evidence": "Anchored on the GPT-5 frontier line via Codex (xhigh reasoning effort). GPT-5-class models are top-tier on SWE-bench Verified, LiveCodeBench, AIME/MATH (strong quantitative-stats proxy for data-analysis), and Spider/BIRD-style SQL. Particularly strong at the numeric/statistical reasoning that data-analysis tasks lean on, and Codex agentic scaffolding handles multi-cell notebook workflows well. Used as Architect tier. Exact 'GPT-5.5' point release is past my Jan 2026 cutoff so I cannot cite its own scores; family placement is top-bracket. Confidence medium pending live leaderboard confirmation of the .5 release.",
         "post_cutoff": true
       },
+      "grok": {
+        "rating": "strong",
+        "confidence": "high",
+        "evidence": "Grok via OpenRouter model `~x-ai/grok-latest` is the current Pareto standard Builder. Prefer it for data-analysis implementation candidates before DeepSeek/Kimi; keep local tests and observed win rates authoritative.",
+        "post_cutoff": true
+      },
       "deepseek": {
         "rating": "moderate",
         "confidence": "high",
@@ -380,6 +416,7 @@
     "sonnet: confirm Sonnet 4.6-specific SWE-bench Verified + Terminal-bench numbers against Anthropic's official model card / release notes — currently inferred from Sonnet 4.5 family priors.",
     "claude: confirm Opus 4.8-specific SWE-bench Verified + agentic/long-horizon numbers vs Opus 4.5/4.1 on Anthropic's model card — exact frontier number unverified.",
     "gpt: confirm GPT-5.5-specific SWE-bench Verified / LiveCodeBench / AIME / SWE-bench agentic numbers vs GPT-5 / GPT-5-Codex on OpenAI's release notes; verify codex_mcp effort=xhigh behavior.",
+    "grok: verify OpenRouter model `~x-ai/grok-latest` against the current agentic-coding boards and, more importantly, local /implement green-diff win rates; it is currently treated as Pareto but should be demoted automatically if outcomes disagree.",
     "deepseek: no verified benchmarks for V4-Pro — check LiveCodeBench, SWE-bench Verified, Aider polyglot, and a DS bench (DS-1000/DABench); also re-test the openrouter deepseek endpoint that returned empty in the prior dogfood run.",
     "minimax: no verified benchmarks for M3 — check LiveCodeBench, SWE-bench Verified, and BigCodeBench; confirm context window and coding placement vs DeepSeek/Kimi; determine whether M3 is a coding-focused release before trusting the conservative smart-contracts 'weak' prior.",
     "kimi: verify 'kimi-k2.7-code' specifically (not K2 base) on SWE-bench Verified, LiveCodeBench, and agentic Terminal-bench; confirm code-variant pandas/SQL performance vs base k2.7.",

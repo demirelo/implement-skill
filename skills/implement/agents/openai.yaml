@@ -1,4 +1,4 @@
 interface:
   display_name: "Implement"
-  short_description: "Autonomous SWE loop to draft PRs"
-  default_prompt: "Use $implement to build this feature end-to-end into a reviewable draft PR."
+  short_description: "Run a Plan as parallel, repairable PRs"
+  default_prompt: "Use $implement to execute this Plan as parallel PR workstreams with my chosen Builders and Reviewer."

@@ -6,6 +6,9 @@
 - **glm** — `team_dispatch.py --provider glm --route direct --effort high` (Venice e2ee).
 
 ## Builders (execution)
+- **grok** — `team_dispatch.py --provider grok --route openrouter`; pins OpenRouter model
+  `~x-ai/grok-latest`. Treat as the current Pareto standard Builder and prefer it over DeepSeek/Kimi
+  unless privacy mode or local outcome data says otherwise.
 - **deepseek / minimax / kimi** — `team_dispatch.py --provider <p>`; prompt on stdin, diff on stdout.
 
 Builder dispatch is wrapped by `execute.make_ow_dispatcher(provider)` (legacy name, kept until

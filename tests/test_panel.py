@@ -17,9 +17,9 @@ def test_claude_plus_codex_rung():
 
 
 def test_full_cross_vendor_prefers_open_builders():
-    p = default_panels({"claude", "gpt", "glm", "deepseek", "minimax", "kimi"})
+    p = default_panels({"claude", "gpt", "glm", "grok", "deepseek", "minimax", "kimi"})
     assert p["architects"] == ["claude", "gpt", "glm"]
-    assert p["builders"] == ["deepseek", "minimax", "kimi"]
+    assert p["builders"] == ["grok", "minimax", "deepseek", "kimi"]
 
 
 def test_unknown_models_are_ignored():
@@ -36,13 +36,13 @@ def test_architects_keep_interactive_front_ends_primary():
 
 
 def test_builders_reflect_verified_routing_order():
-    # default Builder priority follows the measured benchmark routing (knowledge-base/swe-benchmarks.md):
-    # top open agentic builders lead; a strong general builder (Sonnet) sits above the e2ee lane;
-    # the Venice privacy lane is GLM-5.2-first; Haiku is the cheap floor.
-    full = {"claude", "deepseek", "minimax", "sonnet", "kimi",
+    # Grok is the current Pareto standard Builder via OpenRouter; MiniMax remains the lead
+    # non-Grok external Builder; Sonnet is still above the e2ee privacy lane; Haiku is the cheap floor.
+    full = {"claude", "grok", "deepseek", "minimax", "sonnet", "kimi",
             "venice-glm", "venice-qwen", "venice-gpt-oss", "haiku"}   # claude present so the floor stays put
     b = default_panels(full)["builders"]
-    assert b[:2] == ["deepseek", "minimax"]                          # top open agentic (SWE-bench Pro / TB2)
+    assert b[:3] == ["grok", "minimax", "deepseek"]
     assert b.index("sonnet") < b.index("venice-glm")                 # strong general/edits builder above e2ee lane
+    assert b.index("grok") < b.index("deepseek") < b.index("kimi")   # spend more top-k attempts on Grok than DS/Kimi
     assert b.index("venice-glm") < b.index("venice-qwen") < b.index("venice-gpt-oss")   # privacy: GLM-5.2 first
     assert b[-1] == "haiku"                                          # cheap floor last

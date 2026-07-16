@@ -99,6 +99,17 @@ def test_make_dispatcher_threads_model_override():
     assert argv[argv.index("--model") + 1] == "e2ee-qwen3-30b-a3b-p"
 
 
+def test_make_dispatcher_threads_grok_model_override():
+    fake = FakeRun()
+    make_dispatcher({"backend": "team_dispatch", "provider": "grok", "route": "openrouter",
+                     "model": "~x-ai/grok-latest", "effort": "high"}, runner=fake)("p")
+    argv, _ = fake.calls[0]
+    assert argv[argv.index("--provider") + 1] == "grok"
+    assert argv[argv.index("--route") + 1] == "openrouter"
+    assert argv[argv.index("--model") + 1] == "~x-ai/grok-latest"
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
 def test_make_dispatcher_omits_model_when_absent():
     fake = FakeRun()
     make_dispatcher({"backend": "team_dispatch", "provider": "deepseek"}, runner=fake)("p")

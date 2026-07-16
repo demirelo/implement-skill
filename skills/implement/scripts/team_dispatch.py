@@ -9,20 +9,26 @@ the #1 failure mode of the raw script. Also prints token usage + $ cost to stder
 
 Prompt on stdin. Worker text on stdout. Usage/cost on stderr.
 
+  echo "$PROMPT" | python3 team-dispatch.py --provider grok     --route openrouter --effort high
   echo "$PROMPT" | python3 team-dispatch.py --provider deepseek --route direct
   echo "$PROMPT" | python3 team-dispatch.py --provider kimi     --route openrouter --effort low
   echo "$PROMPT" | python3 team-dispatch.py --provider glm      --route direct   # Venice e2ee (confidential)
 
-Providers: deepseek | minimax | kimi | glm   (+ openrouter as a raw passthrough)
+Providers: grok | deepseek | minimax | kimi | glm   (+ openrouter as a raw passthrough)
 Routes:    openrouter (default, reliable, capped reasoning)  |  direct (provider's own API)
 """
 import argparse, json, os, subprocess, sys, time, urllib.request, urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG  = json.load(open(os.path.join(HERE, "providers.json")))
+LIVE_CONFIG_PATH = os.environ.get(
+    "IMPLEMENT_CONFIG_PATH",
+    os.path.expanduser("~/.config/implement/config.json"),
+)
 
-# provider -> (openrouter_slug, direct_cfg_key, $in/Mtok, $out/Mtok)   [prices verified live 2026-06 via OpenRouter]
+# provider -> (openrouter_slug, direct_cfg_key, $in/Mtok, $out/Mtok); 0.0 means "unknown/not estimated".
 PANEL = {
+    "grok":     ("~x-ai/grok-latest",          "openrouter", 0.0,   0.0),
     "deepseek": ("deepseek/deepseek-v4-pro",  "deepseek", 0.435, 0.870),
     "minimax":  ("minimax/minimax-m3",        "minimax",  0.300, 1.200),
     "kimi":     ("moonshotai/kimi-k2.7-code", "kimi",     0.740, 3.500),
@@ -56,6 +62,38 @@ def env_read(provider):
         if value:
             return value
     return ""
+
+
+def live_config():
+    """Read the operator's untracked profile without ever storing credentials here."""
+    try:
+        with open(LIVE_CONFIG_PATH, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def credential_config(provider, seed_cfg):
+    """Overlay live credential-source metadata onto the repository template."""
+    merged = dict(seed_cfg)
+    entry = live_config().get("credentials", {}).get(provider)
+    if not isinstance(entry, dict):
+        return merged
+    source = entry.get("source")
+    if source == "op":
+        if isinstance(entry.get("ref"), str):
+            merged["key_ref"] = entry["ref"]
+        if isinstance(entry.get("account"), str):
+            merged["account"] = entry["account"]
+        merged["require_service_account"] = bool(entry.get("require_service_account"))
+        if isinstance(entry.get("service_account_keychain_service"), str):
+            merged["service_account_keychain_service"] = entry["service_account_keychain_service"]
+    elif source == "env" and isinstance(entry.get("name"), str):
+        merged["env_name"] = entry["name"]
+    elif source == "keychain" and isinstance(entry.get("service"), str):
+        merged["keychain_service"] = entry["service"]
+    return merged
 
 
 def service_account_keychain_service(cfg=None):
@@ -123,7 +161,7 @@ def maybe_resolve_key(provider, cfg):
         if ref and "<" not in ref and ">" not in ref:
             return op_read(ref, cfg.get("account"), require_service_account=True, cfg=cfg)
         return ""
-    key = env_read(provider)
+    key = os.environ.get(cfg.get("env_name", ""), "") if cfg.get("env_name") else env_read(provider)
     if key:
         return key
     if ref and "<" not in ref and ">" not in ref:
@@ -132,6 +170,7 @@ def maybe_resolve_key(provider, cfg):
 
 
 def resolve_key(provider, cfg):
+    cfg = credential_config(provider, cfg)
     key = maybe_resolve_key(provider, cfg)
     if key:
         return key
@@ -202,7 +241,7 @@ def main():
     if not prompt.strip(): sys.exit("team-dispatch: empty prompt on stdin")
 
     if a.provider == "openrouter":
-        slug, direct_key, pin, pout = a.model or "openrouter/auto", "openrouter", 0.0, 0.0
+        slug, direct_key, pin, pout = a.model or CFG["openrouter"].get("model", "openrouter/auto"), "openrouter", 0.0, 0.0
     else:
         slug, direct_key, pin, pout = PANEL[a.provider]
 

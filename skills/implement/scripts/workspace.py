@@ -11,6 +11,7 @@ from scrub import is_secret_file, scrub, env_secrets
 
 _HEAVY = {".git", ".venv", "venv", "node_modules", "dist", "build", "__pycache__", ".worktrees"}
 _WID_OK = re.compile(r"[^A-Za-z0-9._-]")
+_BRANCH_OK = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
 class WorkspaceError(RuntimeError):
@@ -21,6 +22,21 @@ def create_worktree(repo, wid, *, base="HEAD", runner=subprocess.run) -> str:
     safe_wid = _WID_OK.sub("_", str(wid)) or "cand"   # never let a provider name escape the path
     path = str(Path(repo) / ".worktrees" / safe_wid)
     runner(["git", "-C", str(repo), "worktree", "add", "--detach", "-q", path, base],
+           capture_output=True, text=True, check=True)
+    return path
+
+
+def create_branch_worktree(repo, wid, branch, *, base="HEAD", runner=subprocess.run) -> str:
+    """Create a persistent PR worktree on its own branch.
+
+    Candidate competition still uses disposable copies; this worktree owns one Plan item through
+    implementation, review, CI, and merge.
+    """
+    if not branch or branch.startswith("-") or not _BRANCH_OK.match(str(branch)):
+        raise WorkspaceError(f"unsafe branch: {branch!r}")
+    safe_wid = _WID_OK.sub("_", str(wid)) or "item"
+    path = str(Path(repo) / ".worktrees" / f"pr-{safe_wid}")
+    runner(["git", "-C", str(repo), "worktree", "add", "-b", str(branch), path, str(base)],
            capture_output=True, text=True, check=True)
     return path
 
@@ -43,6 +59,15 @@ def reset_worktree(path, runner=subprocess.run) -> None:
 
 def remove_worktree(repo, path, runner=subprocess.run) -> None:
     runner(["git", "-C", str(repo), "worktree", "remove", "--force", str(path)],
+           capture_output=True, text=True)
+
+
+def remove_merged_worktree(repo, path, branch, runner=subprocess.run) -> None:
+    """Remove only the worktree and local branch belonging to a confirmed merged PR."""
+    remove_worktree(repo, path, runner=runner)
+    # `gh pr merge --delete-branch` may already have removed the local branch. Cleanup is
+    # idempotent after merge confirmation: absence is success, never a reason to resurrect/fail.
+    runner(["git", "-C", str(repo), "branch", "-D", str(branch)],
            capture_output=True, text=True)
 
 
