@@ -45,6 +45,16 @@ def test_finalize_sets_body_comments_then_ready_in_order():
     assert res.tier == "green" and res.merged is False
 
 
+def test_finalize_assigns_after_marking_ready():
+    fake = FakeRun()
+    ref = open_draft("/repo", _artifacts(), sign=False, runner=fake)
+    fake.calls.clear()
+    finalize("/repo", ref, _artifacts(), autonomy="handoff", assignee="@me", runner=fake)
+    gh_cmds = [argv for argv, _ in fake.calls if argv[0] == "gh"]
+    assert gh_cmds[-2][:3] == ["gh", "pr", "ready"]
+    assert gh_cmds[-1][-1] == "--add-assignee=@me"
+
+
 SECRET = "sk-abcdefghijklmnopqrstuvwxyz0123"
 
 

@@ -439,3 +439,27 @@ def test_best_of_n_threads_injected_repo_ctx_to_candidates():
 
     run_best_of_n(work, "x", adapter, {"a": mk("a", MULTIPLY_FIX)}, max_turns=2, repo_ctx="MCP_CTX")
     assert "MCP_CTX" in seen["a"] and "def add(a, b)" not in seen["a"]
+
+
+def test_force_turn_dispatches_even_when_baseline_is_green():
+    from apply_patch import apply_patch
+    work = _copy_repo(FIXTURE)
+    assert apply_patch(work, MULTIPLY_FIX).ok
+    adapter = detect_adapter(work)
+    called = []
+    comment = (
+        "--- a/mathx/ops.py\n+++ b/mathx/ops.py\n@@ -4,3 +4,4 @@ def multiply(a, b):\n"
+        " def multiply(a, b):\n"
+        "     return a * b\n"
+        "+# reviewed\n"
+    )
+    res = run_inner_loop(
+        work,
+        "apply a required review fix",
+        adapter,
+        lambda prompt: (called.append(prompt) or comment),
+        max_turns=1,
+        force_turn=True,
+    )
+    assert res.success is True and res.turns == 1
+    assert called

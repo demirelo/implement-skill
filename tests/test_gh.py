@@ -2,7 +2,20 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
 import pytest
-from gh import (commit_and_push, open_draft_pr, post_comment, mark_ready, update_body, PrRef, ForgeError)
+from gh import (
+    commit_and_push,
+    open_draft_pr,
+    post_comment,
+    mark_ready,
+    update_body,
+    assign_pr,
+    checks_green,
+    checks_failed,
+    has_merge_conflict,
+    new_feedback_messages,
+    PrRef,
+    ForgeError,
+)
 
 
 class FakeRun:
@@ -80,6 +93,24 @@ def test_commit_and_push_signs_by_default():
     assert "commit.gpgsign=false" not in commit_cmd   # default keeps the repo's signing config
 
 
+def test_commit_and_push_existing_branch_verifies_current_branch():
+    class BranchRun(FakeRun):
+        def __call__(self, argv, **kw):
+            if argv[:3] == ["git", "branch", "--show-current"]:
+                self.calls.append((argv, kw.get("input")))
+
+                class P:
+                    returncode = 0
+                    stdout = "feat/x\n"
+                    stderr = ""
+                return P()
+            return super().__call__(argv, **kw)
+
+    fake = BranchRun(out="abc123\n")
+    commit_and_push("/repo", "feat/x", "msg", sign=False, checkout=False, runner=fake)
+    assert not any(argv[:2] == ["git", "checkout"] for argv, _ in fake.calls)
+
+
 def test_post_comment_and_ready_and_body_use_pr_ref():
     fake = FakeRun(out="")
     ref = PrRef(number=7, url="https://github.com/o/r/pull/7", branch="b")
@@ -90,6 +121,37 @@ def test_post_comment_and_ready_and_body_use_pr_ref():
     assert fake.calls[0][1] == "hello"
     assert fake.calls[1][0] == ["gh", "pr", "ready", ref.url]
     assert fake.calls[2][0][:3] == ["gh", "pr", "edit"] and fake.calls[2][1] == "newbody"
+
+
+def test_assign_pr_uses_safe_equals_form():
+    fake = FakeRun()
+    assign_pr("/repo", 7, assignee="@me", runner=fake)
+    assert fake.calls[0][0] == ["gh", "pr", "edit", "7", "--add-assignee=@me"]
+
+
+def test_check_and_merge_status_helpers():
+    assert checks_green([
+        {"state": "SUCCESS"},
+        {"bucket": "SKIPPED"},
+    ])
+    assert not checks_green(["not-a-check-row"])
+    assert checks_failed([{"state": "FAILURE"}])
+    assert has_merge_conflict({"mergeable": "CONFLICTING"})
+    assert has_merge_conflict({"mergeStateStatus": "DIRTY"})
+    assert not has_merge_conflict({"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"})
+
+
+def test_new_feedback_messages_deduplicates_by_id():
+    data = {
+        "reviews": [{"id": "r1", "state": "CHANGES_REQUESTED", "body": "fix auth",
+                     "author": {"login": "alice"}}],
+        "comments": [{"id": "c1", "body": "add a regression test",
+                      "author": {"login": "bob"}}],
+    }
+    messages, seen = new_feedback_messages(data)
+    assert len(messages) == 2 and "fix auth" in messages[0]
+    again, _ = new_feedback_messages(data, seen)
+    assert again == []
 
 
 def test_forge_error_on_nonzero_rc():

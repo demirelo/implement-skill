@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 
 from gh import (commit_and_push, open_draft_pr, update_body, post_comment, mark_ready,
-                merge_pr, PrRef, ForgeError)
+                merge_pr, assign_pr, PrRef, ForgeError)
 from handoff import tier, render_pr_body, render_review_comment
 from scrub import scrub, env_secrets
 
@@ -38,16 +38,18 @@ def _secrets(secrets):
     return list(env_secrets() if secrets is None else secrets)
 
 
-def open_draft(repo, artifacts, *, base="main", sign=True, secrets=None, runner=subprocess.run) -> PrRef:
+def open_draft(repo, artifacts, *, base="main", sign=True, existing_branch=False,
+               secrets=None, runner=subprocess.run) -> PrRef:
     sec = _secrets(secrets)
-    commit_and_push(repo, artifacts.branch, artifacts.title, sign=sign, runner=runner)
+    commit_and_push(repo, artifacts.branch, artifacts.title, sign=sign,
+                    checkout=not existing_branch, runner=runner)
     stub = scrub(f"🚧 Draft — Architect review in progress.\n\n## Goal\n{artifacts.goal}\n", sec)
     return open_draft_pr(repo, branch=artifacts.branch, base=base,
                          title=artifacts.title, body=stub, runner=runner)
 
 
 def finalize(repo, pr, artifacts, *, autonomy="auto-merge", merge_method="squash",
-             secrets=None, runner=subprocess.run) -> Handoff:
+             assignee=None, secrets=None, runner=subprocess.run) -> Handoff:
     sec = _secrets(secrets)
     # 0/0 acceptance is a false green (same class as the H5 re_gate guard) — never tier it green
     acceptance_green = artifacts.acceptance_n > 0 and artifacts.acceptance_k >= artifacts.acceptance_n
@@ -59,6 +61,8 @@ def finalize(repo, pr, artifacts, *, autonomy="auto-merge", merge_method="squash
     update_body(repo, pr, body, runner=runner)
     post_comment(repo, pr, scrub(render_review_comment(artifacts.review), sec), runner=runner)
     mark_ready(repo, pr, runner=runner)
+    if assignee:
+        assign_pr(repo, pr, assignee=assignee, runner=runner)
     # Auto-merge fires ONLY on a fully-green tier (acceptance green + winner re-gated + no routed
     # blockers + nothing escalated). 🟡 (can't-verify) and 🔴 always fall back to the human handoff —
     # the ready PR waits. A forge that requires reviews/checks refuses the merge (ForgeError), and we

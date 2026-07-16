@@ -22,6 +22,8 @@ def _pool_entry(name: str, spec: dict) -> dict:
                      route="direct" if private else "openrouter",
                      cred_provider="venice" if private else "openrouter",
                      data="private" if private else "standard")
+        if spec.get("model"):
+            entry["model"] = spec["model"]
     else:  # codex_mcp — carry model + reasoning effort so the orchestrator pins them on every call
         entry["model"] = spec.get("model", name)
     if spec.get("effort"):
@@ -48,4 +50,5 @@ def default_profile(models: dict, providers: dict) -> dict:
             creds[prov] = src
     return {"version": 1, "pool": pool, "panels": panels, "credentials": creds,
             "prefs": {"effort": "low", "max_tokens": 32000, "temperature": 0.3,
-                      "privacy_default": False, "autonomy": "auto-merge"}}
+                      "privacy_default": False, "autonomy": "auto-merge",
+                      "best_of_n": 2}}
