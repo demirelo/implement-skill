@@ -46,7 +46,8 @@ def _load_priors() -> dict:
 def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
                   privacy=False, runner=subprocess.run, env=None, max_turns=6, trusted=False,
                   ledger_path=None, builders=None, dispatcher_overrides=None,
-                  force_turn=False, repo_ctx=None, best_of_n=None):
+                  force_turn=False, repo_ctx=None, best_of_n=None,
+                  required_paths=(), required_paths_must_change=True):
     if profile is None:
         profile = load_profile(start=start, home=home) or default_profile(_MODELS, _PROVIDERS)
     dispatcher_overrides = dispatcher_overrides or {}
@@ -147,7 +148,8 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     best = run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=max_turns,
                          wrap=_wrap, crit=KillCriteria(max_turns=max_turns),
                          panel_context=panel_ctx, repo_ctx=repo_ctx,
-                         force_turn=force_turn)
+                         force_turn=force_turn, required_paths=required_paths,
+                         required_paths_must_change=required_paths_must_change)
     outcomes.log_run(best, bucket, list(dispatchers), path=ledger_path)   # learn from this run
     if panel_ctx is not None:
         continuity.record_run(repo_path, best, bucket, list(dispatchers), home=home)

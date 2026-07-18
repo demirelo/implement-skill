@@ -27,6 +27,16 @@ NOOP_PATCH = (
     "+# noop\n"
 )
 
+MULTIPLY_FIX_WITH_ARTIFACT = MULTIPLY_FIX + (
+    "diff --git a/RESULT.md b/RESULT.md\n"
+    "new file mode 100644\n"
+    "index 0000000..8d617e5\n"
+    "--- /dev/null\n"
+    "+++ b/RESULT.md\n"
+    "@@ -0,0 +1 @@\n"
+    "+# Result\n"
+)
+
 
 def test_inner_loop_reaches_green_in_one_turn():
     work = _copy_repo(FIXTURE)
@@ -68,6 +78,71 @@ def test_failure_is_fed_back_into_next_prompt():
     assert result.success is True
     assert "still failing" in prompts[1]
     assert "# noop" not in (Path(work) / "mathx" / "ops.py").read_text()  # failed turn fully reverted
+
+
+def test_required_artifacts_reject_partial_green_patch_and_retry():
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    prompts = []
+
+    def partial_then_complete(prompt):
+        prompts.append(prompt)
+        return MULTIPLY_FIX if len(prompts) == 1 else MULTIPLY_FIX_WITH_ARTIFACT
+
+    result = run_inner_loop(
+        work,
+        "add multiply() and the result document",
+        adapter,
+        partial_then_complete,
+        max_turns=2,
+        required_paths=("RESULT.md",),
+    )
+
+    assert result.success is True
+    assert result.turns == 2
+    assert "missing required artifacts: RESULT.md" in prompts[1]
+    assert (Path(work) / "RESULT.md").read_text() == "# Result\n"
+
+
+def test_required_artifacts_can_be_existence_only_for_repair():
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    strict = run_inner_loop(
+        work,
+        "add multiply()",
+        adapter,
+        lambda _prompt: MULTIPLY_FIX,
+        max_turns=1,
+        required_paths=("pyproject.toml",),
+    )
+    assert strict.success is False
+    assert "required artifacts not changed: pyproject.toml" in strict.ledger[0]
+
+    repair_work = _copy_repo(FIXTURE)
+    repair = run_inner_loop(
+        repair_work,
+        "add multiply()",
+        detect_adapter(repair_work),
+        lambda _prompt: MULTIPLY_FIX,
+        max_turns=1,
+        required_paths=("pyproject.toml",),
+        required_paths_must_change=False,
+    )
+    assert repair.success is True
+
+
+def test_required_artifacts_reject_path_traversal():
+    import pytest
+
+    work = _copy_repo(FIXTURE)
+    with pytest.raises(ValueError, match="safe repository-relative"):
+        run_inner_loop(
+            work,
+            "x",
+            detect_adapter(work),
+            lambda _prompt: MULTIPLY_FIX,
+            required_paths=("../outside",),
+        )
 
 
 VERBOSE_FIX = (

@@ -63,6 +63,19 @@ def test_campaign_recognizes_lean_acceptance_module_changes():
     assert campaign._has_test_change(["CertifiedNumerics/Grid.lean"]) is False
 
 
+def test_plan_item_threads_required_artifacts_into_builder_brief():
+    item = PlanItem.from_mapping({
+        "id": "docs",
+        "title": "Docs",
+        "required_paths": ["README.md", "specs/SOURCE-MAP.md"],
+    })
+
+    assert item.required_paths == ("README.md", "specs/SOURCE-MAP.md")
+    brief = campaign._task_brief(item, [])
+    assert "Required artifacts (every path must exist in this diff)" in brief
+    assert "- specs/SOURCE-MAP.md" in brief
+
+
 def test_run_campaign_defaults_to_parallel_and_threads_best_of_n():
     barrier = threading.Barrier(2, timeout=10)
     seen = []

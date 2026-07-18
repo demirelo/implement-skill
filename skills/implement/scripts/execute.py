@@ -98,10 +98,51 @@ def _reset(repo_path) -> None:
     subprocess.run(["git", "clean", "-fdq", "-e", ".lake/"], cwd=str(repo_path), check=True)
 
 
+def _normalize_required_paths(required_paths) -> tuple[str, ...]:
+    normalized = []
+    for raw in required_paths or ():
+        value = str(raw).strip()
+        path = Path(value)
+        if not value or path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"required path must be a safe repository-relative path: {raw!r}")
+        normalized.append(path.as_posix().rstrip("/"))
+    return tuple(dict.fromkeys(normalized))
+
+
+def _required_paths_feedback(repo_path, required_paths, *, must_change=True) -> str:
+    required = _normalize_required_paths(required_paths)
+    if not required:
+        return ""
+    root = Path(repo_path)
+    missing = [path for path in required if not (root / path).exists()]
+    unchanged = []
+    if must_change:
+        tracked = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD", "--"],
+            cwd=root, capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=root, capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        changed = {path.strip() for path in tracked + untracked if path.strip()}
+        unchanged = [
+            path for path in required
+            if not any(candidate == path or candidate.startswith(path + "/") for candidate in changed)
+        ]
+    failures = []
+    if missing:
+        failures.append("missing required artifacts: " + ", ".join(missing))
+    if unchanged:
+        failures.append("required artifacts not changed: " + ", ".join(unchanged))
+    return "; ".join(failures)
+
+
 def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, secrets=None,
                    wrap=None, crit=None, panel_context="", repo_ctx=None,
-                   force_turn=False) -> LoopResult:
+                   force_turn=False, required_paths=(), required_paths_must_change=True) -> LoopResult:
     secrets = env_secrets() if secrets is None else secrets
+    required_paths = _normalize_required_paths(required_paths)
     # command-layer gate: refuse a destructive harness command (adapter test_cmd) before running it
     if not guard.classify(shlex.split(adapter["test_cmd"])).safe:
         return LoopResult(success=False, turns=0, error=f"guard denied test_cmd: {adapter['test_cmd']!r}")
@@ -150,7 +191,17 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
             else:   # target green (or unscoped) — FULL confirm catches regressions + enforces H5
                 full = run_gate(repo_path, adapter, wrap=wrap)
                 if full.passed and full.verified_count > 0:
-                    return LoopResult(success=True, turns=turn, diff=diff, ledger=list(ledger))
+                    artifact_failure = _required_paths_feedback(
+                        repo_path, required_paths, must_change=required_paths_must_change
+                    )
+                    if not artifact_failure:
+                        return LoopResult(success=True, turns=turn, diff=diff, ledger=list(ledger))
+                    _reset(repo_path)
+                    ledger.append(scrub(f"turn {turn}: {artifact_failure}", secrets))
+                    turns_log.append({"failing": list(required_paths), "applied": True,
+                                      "denied": False, "green_delta": 0})
+                    gate_result = full
+                    continue
                 _reset(repo_path)  # fully revert the failed attempt — tracked AND untracked files
                 if scoped_ok:   # fixed the target but the full suite is red -> regression; retarget on it
                     note = f"turn {turn}: fixed target but full suite still failing {full.failing_tests}"
@@ -188,7 +239,7 @@ def _diff_size(diff) -> int:
 
 def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secrets=None,
                   wrap=None, crit=None, panel_context=None, repo_ctx=None,
-                  force_turn=False) -> BestResult:
+                  force_turn=False, required_paths=(), required_paths_must_change=True) -> BestResult:
     secrets = env_secrets() if secrets is None else secrets
     panel_context = panel_context or {}
     # Each candidate competes in its OWN isolated copy of the repo, created + torn down inside its own
@@ -204,7 +255,9 @@ def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secr
         try:
             return run_inner_loop(work, task_brief, adapter, dispatchers[name], max_turns, secrets,
                                   wrap=wrap, crit=crit, panel_context=panel_context.get(name, ""),
-                                  repo_ctx=repo_ctx, force_turn=force_turn)
+                                  repo_ctx=repo_ctx, force_turn=force_turn,
+                                  required_paths=required_paths,
+                                  required_paths_must_change=required_paths_must_change)
         finally:
             shutil.rmtree(Path(work).parent, ignore_errors=True)
 

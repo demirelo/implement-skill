@@ -85,6 +85,7 @@ class PlanItem:
     deps: tuple[str, ...] = ()
     acceptance: tuple[str, ...] = ()
     touched_areas: tuple[str, ...] = ()
+    required_paths: tuple[str, ...] = ()
     branch: str = ""
     tests_required: bool = True
 
@@ -100,6 +101,7 @@ class PlanItem:
             deps=tuple(str(x) for x in raw.get("deps", raw.get("dependencies", ()))),
             acceptance=tuple(str(x) for x in raw.get("acceptance", raw.get("criteria", ()))),
             touched_areas=tuple(str(x) for x in raw.get("touched_areas", raw.get("areas", ()))),
+            required_paths=tuple(str(x) for x in raw.get("required_paths", ())),
             branch=str(raw.get("branch", "")).strip(),
             tests_required=bool(raw.get("tests_required", True)),
         )
@@ -292,6 +294,7 @@ def inspect_overlaps(repo, item: PlanItem, *, base="main", exclude_heads=(),
 
 def _task_brief(item: PlanItem, overlaps) -> str:
     acceptance = "\n".join(f"- {x}" for x in item.acceptance) or "- Implement the item as written."
+    required = "\n".join(f"- {x}" for x in item.required_paths) or "- No required artifact paths declared."
     overlap_lines = []
     for x in overlaps:
         if x.get("kind") == "branch":
@@ -307,6 +310,7 @@ def _task_brief(item: PlanItem, overlaps) -> str:
         f"Implement exactly one self-contained Plan item.\n\n"
         f"Item: {item.title}\n\nScope:\n{item.brief}\n\n"
         f"Acceptance:\n{acceptance}\n\n"
+        f"Required artifacts (every path must exist in this diff):\n{required}\n\n"
         f"Open-PR preflight:\n{overlap_notes}\n\n"
         "Add or update tests for every behavior change. Do not modify unrelated Plan items."
     )
@@ -383,6 +387,8 @@ def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispat
             best_of_n=roles.best_of_n,
             dispatcher_overrides=builder_dispatchers,
             force_turn=True,
+            required_paths=item.required_paths,
+            required_paths_must_change=False,
         )
         if not fix.winner or not fix.applied:
             raise CampaignError(f"review-fix round {round_no} produced no green candidate")
@@ -411,6 +417,8 @@ def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
         best_of_n=roles.best_of_n,
         dispatcher_overrides=builder_dispatchers,
         force_turn=True,
+        required_paths=item.required_paths,
+        required_paths_must_change=False,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the CI failure locally")
@@ -474,6 +482,8 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
         best_of_n=roles.best_of_n,
         dispatcher_overrides=builder_dispatchers,
         force_turn=True,
+        required_paths=item.required_paths,
+        required_paths_must_change=False,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the merge conflicts")
@@ -525,6 +535,8 @@ def _repair_review_feedback(worktree, item, roles, profile, review_fn,
         best_of_n=roles.best_of_n,
         dispatcher_overrides=builder_dispatchers,
         force_turn=True,
+        required_paths=item.required_paths,
+        required_paths_must_change=False,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the validated review feedback")
@@ -593,6 +605,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             best_of_n=roles.best_of_n,
             dispatcher_overrides=builder_dispatchers,
             force_turn=True,
+            required_paths=item.required_paths,
         )
         if not best.winner or not best.applied:
             raise CampaignError("no Builder candidate produced an applicable green implementation")
