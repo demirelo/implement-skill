@@ -315,9 +315,9 @@ def test_two_tier_skips_full_suite_while_scoped_is_red(monkeypatch):
         seq.append("scoped" if only else "full")
         if only is None:
             return (GateResult(passed=False, failing_tests=["t::a"]) if seq.count("full") == 1
-                    else GateResult(passed=True, passing_count=3))
+                    else GateResult(passed=True, passing_count=3, verified_count=3))
         return (GateResult(passed=False, failing_tests=["t::a"]) if seq.count("scoped") == 1
-                else GateResult(passed=True, passing_count=1))
+                else GateResult(passed=True, passing_count=1, verified_count=1))
 
     monkeypatch.setattr(execute, "run_gate", fake_gate)
     monkeypatch.setattr(execute, "apply_patch",
@@ -394,6 +394,26 @@ def test_copy_repo_includes_gitignored_non_heavy_files(tmp_path):
     work = _copy_repo(str(src))
     assert (Path(work) / ".env").read_text() == "LOCAL_CONFIG=needed-by-tests\n"   # config preserved
     assert not (Path(work) / "__pycache__").exists()                                # heavy dir skipped
+
+
+def test_copy_repo_hydrates_lake_cache_without_tracking_or_prompting_it(tmp_path):
+    import subprocess
+    from execute import _repo_context, _reset
+    src = tmp_path / "lean"
+    (src / ".lake" / "packages" / "mathlib").mkdir(parents=True)
+    (src / ".lake" / "packages" / "mathlib" / "Cache.lean").write_text("CACHE_SECRET\n")
+    (src / "Main.lean").write_text("def visible : Nat := 1\n")
+    work = _copy_repo(src)
+    assert (Path(work) / ".lake" / "packages" / "mathlib" / "Cache.lean").exists()
+    tracked = subprocess.run(["git", "ls-files", ".lake"], cwd=work,
+                             capture_output=True, text=True, check=True).stdout
+    assert tracked == ""
+    context = _repo_context(work)
+    assert "def visible" in context and "CACHE_SECRET" not in context
+    (Path(work) / "junk.txt").write_text("remove")
+    _reset(work)
+    assert not (Path(work) / "junk.txt").exists()
+    assert (Path(work) / ".lake" / "packages" / "mathlib" / "Cache.lean").exists()
 
 
 def test_best_of_n_candidates_are_isolated_copies():

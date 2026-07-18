@@ -57,6 +57,12 @@ def test_execution_waves_serialize_predicted_conflicts():
     assert [[x.id for x in wave] for wave in waves] == [["a"], ["b"]]
 
 
+def test_campaign_recognizes_lean_acceptance_module_changes():
+    assert campaign._has_test_change(["Tests/Upwind.lean"]) is True
+    assert campaign._has_test_change(["CertifiedNumerics/GridTest.lean"]) is True
+    assert campaign._has_test_change(["CertifiedNumerics/Grid.lean"]) is False
+
+
 def test_run_campaign_defaults_to_parallel_and_threads_best_of_n():
     barrier = threading.Barrier(2, timeout=10)
     seen = []

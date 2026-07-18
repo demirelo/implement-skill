@@ -39,6 +39,21 @@ def test_worktree_lifecycle_and_scoped_reset(tmp_path):
     assert (repo / "pkg" / "m.py").read_text().startswith("def f()")       # live tree untouched (H7)
 
 
+def test_worktree_hydrates_and_preserves_private_lake_cache(tmp_path):
+    repo = _git_repo(tmp_path)
+    marker = repo / ".lake" / "packages" / "mathlib" / "marker"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("hydrated")
+    wt = create_worktree(str(repo), "lean-cache")
+    copied = Path(wt) / ".lake" / "packages" / "mathlib" / "marker"
+    assert copied.read_text() == "hydrated"
+    (Path(wt) / "junk.txt").write_text("remove")
+    reset_worktree(wt)
+    assert copied.read_text() == "hydrated"
+    assert not (Path(wt) / "junk.txt").exists()
+    remove_worktree(str(repo), wt)
+
+
 def test_reset_refuses_non_worktree_path_protecting_live_tree(tmp_path):
     # H7: reset_worktree must REFUSE the live repo root (a caller bug must not destroy uncommitted work)
     repo = _git_repo(tmp_path)
@@ -63,6 +78,16 @@ def test_repo_context_tracked_only_and_scrubs(tmp_path):
     assert "def f()" in ctx                                                   # tracked source present
     assert "HEAVY" not in ctx and "LEAKED" not in ctx                        # untracked excluded
     assert "sk-abcdefghijklmnopqrstuvwxyz0123" not in ctx and "***" in ctx   # tracked secret scrubbed
+
+
+def test_repo_context_includes_tracked_lean_sources_and_toolchain(tmp_path):
+    repo = _git_repo(tmp_path)
+    (repo / "Certified").mkdir()
+    (repo / "Certified" / "Grid.lean").write_text("def cells : Nat := 4\n")
+    (repo / "lean-toolchain").write_text("leanprover/lean4:v4.31.0\n")
+    sp.run(["git", "add", "Certified/Grid.lean", "lean-toolchain"], cwd=repo, check=True)
+    ctx = repo_context(str(repo), max_chars=5000)
+    assert "def cells" in ctx and "leanprover/lean4:v4.31.0" in ctx
 
 
 def test_persistent_pr_worktree_owns_branch_until_confirmed_merge(tmp_path):

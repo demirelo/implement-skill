@@ -38,6 +38,17 @@ for a visual one-pager.
 Parallelism exists at two levels: independent PR workstreams run concurrently, and each workstream
 runs its configured N Builder candidates concurrently.
 
+### Supported objective gates
+
+- Python repositories: pytest (`python-pytest`).
+- TypeScript repositories: Vitest (`typescript-vitest`).
+- Lean 4 repositories: Lake (`lean-lake`), detected from `lean-toolchain`/`lakefile.*`. Full gates
+  run `lake build` **and elaborate every declared acceptance module**; focused oracle checks run
+  `lake env lean <module>`. Lean acceptance modules live
+  under `Tests/`/`Test/` or use a `*Test.lean`/`*Tests.lean` suffix. The pinned toolchain and Lake
+  dependencies must already be installed and hydrated because sandboxed gates have no network
+  access. See [`references/lean.md`](skills/implement/references/lean.md).
+
 ## Model roles
 
 | Role | Selection | Responsibility |

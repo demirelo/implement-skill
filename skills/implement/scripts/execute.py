@@ -3,6 +3,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,12 +13,14 @@ import kill
 from gate import run_gate
 from apply_patch import apply_patch
 from scrub import is_secret_file, scrub, env_secrets
+from lean_support import hydrate_lean_cache
 
 # heavy/generated dirs to skip when copying a candidate workspace (H8). Only dirs that are
 # gitignored by universal convention — NOT build/dist, which a repo can legitimately track.
 _HEAVY_IGNORE = shutil.ignore_patterns(
-    ".git", ".venv", "venv", "node_modules", "__pycache__", ".worktrees",
+    ".git", ".lake", ".venv", "venv", "node_modules", "__pycache__", ".worktrees",
     ".mypy_cache", ".pytest_cache", ".ruff_cache")
+_CONTEXT_GLOBS = ("*.py", "*.lean", "lakefile.toml", "lakefile.lean", "lean-toolchain")
 
 
 @dataclass
@@ -42,14 +45,21 @@ def _copy_repo(repo_path) -> str:
     subprocess.run(["git", "-c", "user.email=impl@local", "-c", "user.name=impl",
                     "-c", "commit.gpgsign=false",
                     "commit", "-q", "-m", "baseline"], cwd=dst)
+    hydrate_lean_cache(repo_path, dst)  # private ignored closure, never part of the candidate diff
     return str(dst)
 
 
 def _repo_context(repo_path, max_chars=12000) -> str:
     chunks, total = [], 0
-    for path in sorted(Path(repo_path).rglob("*.py")):
+    paths: set[Path] = set()
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in {".git", ".lake", ".worktrees", ".venv",
+                                                "venv", "node_modules", "__pycache__"}]
+        paths.update(Path(root) / name for name in files
+                     if any(Path(name).match(pattern) for pattern in _CONTEXT_GLOBS))
+    for path in sorted(paths):
         rel = path.relative_to(repo_path)
-        if ".git" in rel.parts or is_secret_file(path):
+        if {".git", ".lake", ".worktrees"}.intersection(rel.parts) or is_secret_file(path):
             continue
         try:
             chunk = f"=== {rel} ===\n{path.read_text()}"
@@ -85,7 +95,7 @@ def _build_prompt(task_brief, gate_result, ledger, repo_path, secrets=(), panel_
 
 def _reset(repo_path) -> None:
     subprocess.run(["git", "reset", "--hard", "-q", "HEAD"], cwd=str(repo_path), check=True)
-    subprocess.run(["git", "clean", "-fdq"], cwd=str(repo_path), check=True)
+    subprocess.run(["git", "clean", "-fdq", "-e", ".lake/"], cwd=str(repo_path), check=True)
 
 
 def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, secrets=None,
@@ -95,6 +105,11 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
     # command-layer gate: refuse a destructive harness command (adapter test_cmd) before running it
     if not guard.classify(shlex.split(adapter["test_cmd"])).safe:
         return LoopResult(success=False, turns=0, error=f"guard denied test_cmd: {adapter['test_cmd']!r}")
+    if adapter.get("test_one"):
+        scoped_cmd = adapter["test_one"].format(path="Tests/Oracle.lean")
+        if not guard.classify(shlex.split(scoped_cmd)).safe:
+            return LoopResult(success=False, turns=0,
+                              error=f"guard denied test_one: {adapter['test_one']!r}")
     # #3: identical every turn (failed turns fully revert) — read once. An orchestrator can inject a
     # FOCUSED context (e.g. assembled from codebase-memory-mcp: only the symbols/files this task
     # touches + the failing test's callers) instead of the blunt full-tree dump — far fewer tokens.
@@ -103,9 +118,9 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
     turns_log: list = []   # structured, fed to kill.should_stop
     gate_result = run_gate(repo_path, adapter, wrap=wrap)   # turn 0: FULL suite — establishes the oracle
     if gate_result.passed:   # H5: a "green" with 0 executed tests is a false green (no oracle), not success
-        if gate_result.passing_count > 0 and not force_turn:
+        if gate_result.verified_count > 0 and not force_turn:
             return LoopResult(success=True, turns=0)
-        if gate_result.passing_count == 0:
+        if gate_result.verified_count == 0:
             return LoopResult(success=False, turns=0, error="vacuous green: 0 tests executed")
         # Review-fix passes start from a green tree but still require a Builder-authored delta.
         # The task brief carries the routed findings; the full gate below verifies the fix.
@@ -134,7 +149,7 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
                 gate_result = scoped
             else:   # target green (or unscoped) — FULL confirm catches regressions + enforces H5
                 full = run_gate(repo_path, adapter, wrap=wrap)
-                if full.passed and full.passing_count > 0:
+                if full.passed and full.verified_count > 0:
                     return LoopResult(success=True, turns=turn, diff=diff, ledger=list(ledger))
                 _reset(repo_path)  # fully revert the failed attempt — tracked AND untracked files
                 if scoped_ok:   # fixed the target but the full suite is red -> regression; retarget on it

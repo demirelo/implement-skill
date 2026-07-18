@@ -1,7 +1,8 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
-from implement import run_implement
+from implement import run_implement, _acceptance_tests
+from gate import detect_adapter
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
 
@@ -144,6 +145,48 @@ def test_run_implement_oracle_glob_ignores_worktrees(tmp_path):
     profile = {"pool": {}, "panels": {"architects": [], "builders": []}, "credentials": {}, "prefs": {}}
     with pytest.raises(RuntimeError, match="oracle"):
         run_implement(str(repo), "x", profile=profile, runner=None, max_turns=1, trusted=True)
+
+
+def test_adapter_defined_oracles_discover_lean_tests_and_ignore_worktrees(tmp_path):
+    (tmp_path / "Tests").mkdir()
+    (tmp_path / "Tests" / "Grid.lean").write_text("#check Nat\n")
+    (tmp_path / ".worktrees" / "old" / "Tests").mkdir(parents=True)
+    (tmp_path / ".worktrees" / "old" / "Tests" / "Stale.lean").write_text("#check Nat\n")
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.31.0\n")
+    (tmp_path / "lakefile.toml").write_text("name = 'x'\n")
+    adapter = detect_adapter(tmp_path)
+    assert _acceptance_tests(tmp_path, adapter) == [str(tmp_path / "Tests" / "Grid.lean")]
+
+
+def test_run_implement_preflights_lean_before_model_spend(tmp_path, monkeypatch):
+    import implement
+    (tmp_path / "Tests").mkdir()
+    (tmp_path / "Tests" / "Grid.lean").write_text("#check Nat\n")
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.31.0\n")
+    (tmp_path / "lakefile.toml").write_text('name = "x"\n')
+    monkeypatch.setattr(implement, "preflight_lean",
+                        lambda _repo: (_ for _ in ()).throw(RuntimeError("LEAN_PREFLIGHT")))
+    profile = {"pool": {}, "panels": {"architects": [], "builders": []},
+               "credentials": {}, "prefs": {}}
+    import pytest
+    with pytest.raises(RuntimeError, match="LEAN_PREFLIGHT"):
+        run_implement(tmp_path, "x", profile=profile, trusted=True)
+
+
+def test_run_implement_refuses_python_docker_image_for_lean(tmp_path, monkeypatch):
+    import implement
+    import pytest
+    from sandbox import SandboxUnavailable
+    (tmp_path / "Tests").mkdir()
+    (tmp_path / "Tests" / "Grid.lean").write_text("#check Nat\n")
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.31.0\n")
+    (tmp_path / "lakefile.toml").write_text('name = "x"\n')
+    monkeypatch.setattr(implement, "preflight_lean", lambda _repo: None)
+    monkeypatch.setattr(implement, "available_backends", lambda: ["docker", "none"])
+    profile = {"pool": {}, "panels": {"architects": [], "builders": []},
+               "credentials": {}, "prefs": {}}
+    with pytest.raises(SandboxUnavailable, match="Python gate image"):
+        run_implement(tmp_path, "x", profile=profile, trusted=False)
 
 
 def test_run_implement_auto_packs_panel_context_and_records_run(tmp_path, monkeypatch):

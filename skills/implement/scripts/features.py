@@ -24,6 +24,8 @@ def bucket(task_brief, adapter=None) -> str:
     name = (adapter or {}).get("name", "").lower()
     if "solidity" in name or "foundry" in name:
         return "smart-contracts"
+    if "lean" in name or "lake" in name:
+        return "algorithmic-math"
     t = (task_brief or "").lower()
     for dom, matchers in _MATCHERS.items():
         if any(rx.search(t) for rx in matchers):

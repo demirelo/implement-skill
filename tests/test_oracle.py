@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
@@ -7,6 +8,7 @@ from gate import detect_adapter
 from execute import _copy_repo
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
+ADAPTERS_DIR = Path(__file__).parent.parent / "skills" / "implement" / "scripts" / "adapters"
 
 RED_BODY = (
     "from mathx import ops\n\n\n"
@@ -53,6 +55,37 @@ def test_check_red_flags_malformed_test_as_not_wellformed():
                      body="def test_x(:\n    pass\n", criteria_refs=("c1",))   # syntax error
     red = check_red(t, work, adapter)
     assert red.is_red is False and red.well_formed is False and red.collected == 0
+
+
+def test_check_red_understands_lean_elaboration_failure_and_syntax_failure(tmp_path):
+    adapter = json.loads((ADAPTERS_DIR / "lean_lake.json").read_text())
+    test = AuthoredTest("r2", "Tests/Upwind.lean", "#check signedUpwind\n", ("r2",))
+
+    class MissingTheorem:
+        returncode = 1
+        stdout = "Tests/Upwind.lean:1:7: error: unknown identifier 'signedUpwind'\n"
+        stderr = ""
+
+    red = check_red(test, tmp_path, adapter, runner=lambda *_a, **_k: MissingTheorem())
+    assert red.is_red is True and red.well_formed is True and red.collected == 1
+
+    class Malformed:
+        returncode = 1
+        stdout = "Tests/Upwind.lean:1:7: error: unexpected token ')'\n"
+        stderr = ""
+
+    bad = check_red(test, tmp_path, adapter, runner=lambda *_a, **_k: Malformed())
+    assert bad.is_red is False and bad.well_formed is False
+
+
+def test_check_red_refuses_unguarded_lean_test_command_without_writing(tmp_path):
+    adapter = json.loads((ADAPTERS_DIR / "lean_lake.json").read_text())
+    adapter["test_one"] = "lake env sh {path}"
+    test = AuthoredTest("r2", "Tests/Unsafe.lean", "#check Nat\n", ("r2",))
+    result = check_red(test, tmp_path, adapter, runner=lambda *_a, **_k: None)
+    assert result.is_red is False and result.well_formed is False
+    assert "guard denied" in result.reason
+    assert not (tmp_path / "Tests" / "Unsafe.lean").exists()
 
 
 def test_reject_if_touches_oracle_normalizes_dot_slash():

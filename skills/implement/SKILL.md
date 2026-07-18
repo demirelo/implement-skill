@@ -90,6 +90,8 @@ Before starting an item:
 - inspect open PRs and remote branches for matching scope or touched files;
 - read panel memory for known issues, rejected approaches, and accepted decisions;
 - record the base SHA and overlap result in the PR notes.
+- when the adapter is `lean-lake`, satisfy the exact-toolchain, committed-manifest, and hydrated
+  dependency preflight in `references/lean.md` before any model call.
 
 During implementation:
 
@@ -153,5 +155,6 @@ Count an item complete only when its PR is ready with all required gates satisfi
 - `references/panel-continuity.md` — Builder memory and fresh-review separation.
 - `references/guardrails.md` — sandbox, oracle, command, worktree, and stop conditions.
 - `references/phase-1.md` — acceptance-test oracle rules.
+- `references/lean.md` — Lean/Lake toolchain, oracle, cache, sandbox, and gate contract.
 - `references/credentials.md` / `references/onboarding.md` — model pool and credential setup.
 - `scripts/implement.py` / `scripts/execute.py` — single-item Best-of-N primitive used by campaigns.

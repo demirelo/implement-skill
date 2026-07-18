@@ -324,6 +324,11 @@ def _has_test_change(paths) -> bool:
         Path(x).name.startswith("test_")
         or "/tests/" in f"/{x}"
         or x.endswith((".spec.ts", ".test.ts", ".spec.js", ".test.js"))
+        or (
+            x.endswith(".lean")
+            and (set(part.lower() for part in Path(x).parts) & {"test", "tests"}
+                 or Path(x).stem.endswith(("Test", "Tests")))
+        )
         for x in paths
     )
 
@@ -344,7 +349,7 @@ def _reviewer(profile, reviewer, override, runner):
 def _verify_local(worktree):
     adapter = detect_adapter(worktree)
     gate = run_gate(worktree, adapter)
-    if not gate.passed or gate.passing_count <= 0:
+    if not gate.passed or gate.verified_count <= 0:
         raise CampaignError(f"local verification failed: {gate.summary}")
     return adapter, gate
 

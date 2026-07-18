@@ -207,7 +207,7 @@ def re_gate(repo, winner_diff, adapter, wrap=None) -> ReGate:
     if not gr.passed:
         _reset(repo)   # H4: a non-green winner is rolled back
         return ReGate(passed=False, executed=0, summary=gr.summary)
-    executed = sum(int(m.group(1)) for m in re.finditer(r"(\d+) passed", gr.stdout))
+    executed = gr.verified_count
     if executed == 0:  # H5: a "green" with zero executed tests (e.g. all skipped) is a false green
         _reset(repo)
         return ReGate(passed=False, executed=0, summary="false green: 0 tests executed (H5)")

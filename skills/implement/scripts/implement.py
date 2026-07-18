@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from gate import detect_adapter
+from gate import detect_adapter, oracle_paths
 from execute import run_best_of_n
 from preflight import readiness, enforce_privacy
 from backends import make_dispatcher, PrivacyViolation, UnsupportedBackend
@@ -13,6 +13,8 @@ from seed import default_profile
 from suitability import assess as assess_suitability
 from sandbox import choose_backend, available_backends, wrap as sandbox_wrap
 from kill import KillCriteria
+from lean_support import is_lean_adapter, preflight_lean
+from sandbox import SandboxUnavailable
 import continuity
 import features
 import outcomes
@@ -22,6 +24,10 @@ _HERE = Path(__file__).resolve().parent   # resolve() so the repo-relative reads
 _MODELS = json.loads((_HERE / "models.json").read_text())
 _PROVIDERS = json.loads((_HERE / "providers.json").read_text())
 _PRIOR_ALIAS = {"venice-glm": "glm"}   # privacy-lane Builder shares its model's cold-start prior
+
+
+def _acceptance_tests(repo_path, adapter) -> list[str]:
+    return [str(path) for path in oracle_paths(repo_path, adapter)]
 
 
 def _load_priors() -> dict:
@@ -61,19 +67,25 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     if privacy or profile.get("prefs", {}).get("privacy_default"):
         profile, privacy = enforce_privacy(profile), True
     adapter = detect_adapter(repo_path)
+    if is_lean_adapter(adapter):
+        preflight_lean(repo_path)
     # suitability filter — refuse autonomous mode without an objective oracle (a green would be vacuous).
-    # Exclude generated/stale dirs so a leftover .worktrees/ candidate copy can't fake an oracle.
-    _skip = {"__pycache__", ".worktrees", ".venv", "venv", "node_modules"}
-    acceptance_tests = [str(p) for p in Path(repo_path).rglob("test_*.py")
-                        if not _skip.intersection(p.parts)]
+    acceptance_tests = _acceptance_tests(repo_path, adapter)
     suit = assess_suitability(adapter=adapter, acceptance_tests=acceptance_tests)
     if not suit.autonomous_ok:
         raise RuntimeError("refusing autonomous run (no objective oracle): " + "; ".join(suit.reasons))
     # H6 — pick a sandbox backend (raises SandboxUnavailable if untrusted + no backend); wrap the gate
     backend = choose_backend(trusted=trusted, available=available_backends())
+    docker_image = adapter.get("docker_image")
+    if is_lean_adapter(adapter) and backend == "docker" and not docker_image:
+        raise SandboxUnavailable(
+            "Lean/Lake gate selected Docker, but the adapter has no explicitly pinned "
+            "docker_image; refusing to fall back to the Python gate image"
+        )
 
     def _wrap(argv, workdir):
-        return sandbox_wrap(argv, backend=backend, workdir=workdir)
+        kwargs = {"image": docker_image} if docker_image else {}
+        return sandbox_wrap(argv, backend=backend, workdir=workdir, **kwargs)
 
     live = {r.model: r.live for r in readiness(profile, env=env, runner=runner)}
     pool, panels = profile.get("pool", {}), profile.get("panels", {})

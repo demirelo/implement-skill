@@ -2,6 +2,7 @@
   "name": "python-pytest",
   "detect": ["pyproject.toml", "setup.py", "conftest.py"],
   "test_layout": "tests/test_*.py with `def test_*` functions; plain asserts",
+  "oracle_globs": ["**/test_*.py"],
   "test_cmd": "pytest -q --tb=no -rf",
   "test_one": "pytest {path} -q --tb=no -rf",
   "timeout": 600,

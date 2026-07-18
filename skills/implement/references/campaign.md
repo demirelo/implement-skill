@@ -49,8 +49,12 @@ separate worktrees.
 1. Fetch/prune the remote base; never reset or pull over the operator's working checkout.
 2. Inspect open PRs and remote branches for matching files/scope.
 3. Create `implement/<item-id>-<slug>` in `.worktrees/pr-<item-id>`.
+   For Lean, copy the root checkout's pre-hydrated `.lake` closure into the isolated worktree; never
+   fetch dependencies from a Builder or inside the sandbox.
 4. Run `implement.run_implement(..., builders=..., best_of_n=N, force_turn=True)`.
 5. Require a non-vacuous full local gate and a behavior-test diff.
+   A Lean full gate means `lake build` plus elaboration of every adapter-declared acceptance module,
+   not merely a successful default Lake target.
 6. Run the configured Reviewer through `review.build_final_review_prompt` and
    `review.parse_final_review`.
 7. Route objective blockers back through the same Best-of-N configuration; re-gate and re-review.

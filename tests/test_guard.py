@@ -6,8 +6,18 @@ from guard import classify
 
 def test_allows_known_gate_commands():
     for c in (["pytest", "-q"], ["ruff", "check", "."], ["uv", "sync"], ["mypy", "."],
-              ["python3", "-m", "pytest"], ["pip", "install", "-e", "."]):
+              ["python3", "-m", "pytest"], ["pip", "install", "-e", "."],
+              ["lake", "build"], ["lake", "env", "lean", "Tests/Foo.lean"],
+              ["lean", "Tests/Foo.lean"], ["elan", "show"]):
         assert classify(c).safe is True, c
+
+
+def test_denies_lean_dependency_mutation_and_arbitrary_lake_env_programs():
+    for c in (["lake", "update"], ["lake", "upgrade"], ["lake", "env", "sh", "-c", "true"],
+              ["lake", "env", "python", "script.py"], ["elan", "update"],
+              ["elan", "toolchain", "install", "leanprover/lean4:nightly"],
+              ["elan", "toolchain", "uninstall", "stable"]):
+        assert classify(c).safe is False, c
 
 
 def test_denies_rm_in_every_flag_form():

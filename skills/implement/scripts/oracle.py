@@ -8,6 +8,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from guard import classify
+
 _HUNK_PLUS = re.compile(r"^\+\+\+ b/(.+)$", re.MULTILINE)
 _HUNK_MINUS = re.compile(r"^--- a/(.+)$", re.MULTILINE)
 _RENAME = re.compile(r"^rename (?:from|to) (.+)$", re.MULTILINE)
@@ -78,12 +80,31 @@ def check_red(test: AuthoredTest, repo, adapter, runner=None) -> RedResult:
     # status. We prove THIS test fails on current code.
     runner = runner or subprocess.run
     target = _safe_target(repo, test.path)
+    cmd = adapter.get("test_one", "pytest {path} -q --tb=no -rf").format(path=test.path)
+    verdict = classify(shlex.split(cmd))
+    if not verdict.safe:
+        return RedResult(is_red=False, well_formed=False, collected=0, failing=0,
+                         reason=f"guard denied test_one: {verdict.reason}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(test.body)
-    cmd = adapter.get("test_one", "pytest {path} -q --tb=no -rf").format(path=test.path)
     proc = runner(shlex.split(cmd), cwd=str(repo), capture_output=True, text=True,
                   timeout=adapter.get("timeout", 600))
     out = (proc.stdout or "") + (proc.stderr or "")
+    if adapter.get("result_parser") == "lean":
+        malformed = bool(re.search(adapter.get("malformed_pattern", r"(?!)"), out))
+        infrastructure = bool(re.search(adapter.get("infrastructure_pattern", r"(?!)"), out))
+        well_formed = not malformed and not infrastructure
+        collected = 0 if infrastructure else 1
+        failing = int(proc.returncode != 0 and well_formed)
+        is_red = failing == 1
+        reason = "" if is_red else (
+            "passes immediately" if proc.returncode == 0
+            else "infrastructure error" if infrastructure
+            else "malformed Lean acceptance module" if malformed
+            else "no collectable failing check"
+        )
+        return RedResult(is_red=is_red, well_formed=well_formed, collected=collected,
+                         failing=failing, reason=reason)
     collected = _count_collected(out)
     # pytest emits "error(s) during collection" (singular or plural) when a test can't be imported;
     # an "ERROR " line is the per-file collection failure marker.

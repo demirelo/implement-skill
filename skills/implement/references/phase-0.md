@@ -9,9 +9,14 @@ Helpers: `skills/implement/scripts/intent.py`, `skills/implement/scripts/arch.py
 ## Steps the orchestrator runs
 
 1. **Pin the gate language FIRST.** Call `gate.detect_adapter(repo)` before any model spend and read
-   its `name` (e.g. `python-pytest`) into `repo_framework`. This guards the gate-language invariant:
+   its `name` (e.g. `python-pytest`, `typescript-vitest`, or `lean-lake`) into `repo_framework`.
+   This guards the gate-language invariant:
    acceptance tests must live in the target repo's own framework. `intent.validate` flags
    `WRONG_FRAMEWORK` if it is unset.
+
+   For `lean-lake`, immediately apply `references/lean.md`: exact installed `lean-toolchain`, a
+   committed manifest when dependencies are declared, and a hydrated `.lake/packages` closure are
+   preconditions. A lone `lean-toolchain` marker without a Lakefile does not select the adapter.
 
 2. **Convene the Architect panel.** `panel = arch.arch_panel(profile, env=...)`. For each `ArchSpec`:
    - `spec.mode == "script"` → `arch.ask(spec, prompt)` (Claude headless, GLM/Venice).

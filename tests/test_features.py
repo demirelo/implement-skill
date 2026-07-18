@@ -8,6 +8,10 @@ def test_bucket_adapter_solidity():
     assert bucket("fix the contract", {"name": "solidity-foundry"}) == "smart-contracts"
 
 
+def test_bucket_adapter_lean():
+    assert bucket("prove conservation", {"name": "lean-lake"}) == "algorithmic-math"
+
+
 def test_bucket_keyword_math():
     assert bucket("implement Dijkstra's algorithm", {"name": "python-pytest"}) == "algorithmic-math"
 
