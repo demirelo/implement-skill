@@ -1,4 +1,5 @@
 import sys
+import subprocess
 import threading
 from pathlib import Path
 
@@ -74,6 +75,28 @@ def test_plan_item_threads_required_artifacts_into_builder_brief():
     brief = campaign._task_brief(item, [])
     assert "Required artifacts (every path must exist in this diff)" in brief
     assert "- specs/SOURCE-MAP.md" in brief
+
+
+def test_review_diff_and_changed_files_include_untracked_artifacts(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("base\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.com",
+         "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"],
+        cwd=tmp_path, check=True,
+    )
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    (tmp_path / "new.md").write_text("# New artifact\n")
+
+    diff = campaign._review_diff(tmp_path, base, subprocess.run)
+
+    assert "+++ b/new.md" in diff
+    assert "+# New artifact" in diff
+    assert campaign._changed_files(tmp_path, base, subprocess.run) == ["new.md"]
 
 
 def test_run_campaign_defaults_to_parallel_and_threads_best_of_n():
@@ -343,7 +366,7 @@ def test_review_feedback_is_validated_then_routed_to_builders(monkeypatch):
 
 
 def test_final_reviewer_invalid_output_retries_before_handoff(monkeypatch):
-    monkeypatch.setattr(campaign, "_run", lambda *a, **k: "DIFF")
+    monkeypatch.setattr(campaign, "_review_diff", lambda *a, **k: "DIFF")
     replies = iter([
         "not json",
         "still not json",

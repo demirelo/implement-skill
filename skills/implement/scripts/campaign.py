@@ -317,10 +317,11 @@ def _task_brief(item: PlanItem, overlaps) -> str:
 
 
 def _changed_files(repo, base_sha, runner) -> list[str]:
-    return [
-        x for x in _run(["git", "diff", "--name-only", base_sha, "--"], repo, runner).splitlines()
-        if x.strip()
-    ]
+    tracked = _run(["git", "diff", "--name-only", base_sha, "--"], repo, runner).splitlines()
+    untracked = _run(
+        ["git", "ls-files", "--others", "--exclude-standard"], repo, runner
+    ).splitlines()
+    return list(dict.fromkeys(x.strip() for x in tracked + untracked if x.strip()))
 
 
 def _has_test_change(paths) -> bool:
@@ -358,10 +359,35 @@ def _verify_local(worktree):
     return adapter, gate
 
 
+def _review_diff(worktree, base_sha, runner) -> str:
+    chunks = [_run(["git", "diff", "--binary", base_sha, "--"], worktree, runner)]
+    untracked = _run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"], worktree, runner
+    )
+    for raw in untracked.split("\0"):
+        rel = raw.strip()
+        path = Path(rel)
+        if not rel:
+            continue
+        if path.is_absolute() or ".." in path.parts:
+            raise CampaignError(f"unsafe untracked review path: {rel!r}")
+        proc = runner(
+            ["git", "diff", "--binary", "--no-index", "--", "/dev/null", rel],
+            cwd=str(worktree), capture_output=True, text=True,
+        )
+        if proc.returncode not in (0, 1):
+            raise CampaignError(
+                f"git diff --no-index failed: {(proc.stderr or '').strip()[:240]}"
+            )
+        if proc.stdout:
+            chunks.append(proc.stdout)
+    return "".join(chunks)
+
+
 def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispatchers,
                        runner, env, trusted, base_sha):
     for round_no in range(1, 4):
-        diff = _run(["git", "diff", "--binary", base_sha, "--"], worktree, runner)
+        diff = _review_diff(worktree, base_sha, runner)
         raw = review_fn(build_final_review_prompt(
             item_title=item.title,
             item_brief=item.brief,
