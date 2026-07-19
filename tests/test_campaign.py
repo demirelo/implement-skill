@@ -32,8 +32,19 @@ def _profile():
 def test_role_models_best_of_n_defaults_to_two_and_is_validated():
     roles = RoleModels(("a", "b", "c"), "reviewer")
     assert roles.best_of_n == 2
+    # DEFAULT (degrade): a shorter list than best_of_n is allowed — it just runs fewer Builders.
+    ok = RoleModels(("a", "b"), "reviewer", best_of_n=3)
+    assert ok.active_builders == ("a", "b")
+    # STRICT: exact count demanded up front.
     with pytest.raises(ValueError, match="requires at least 3"):
-        RoleModels(("a", "b"), "reviewer", best_of_n=3)
+        RoleModels(("a", "b"), "reviewer", best_of_n=3, strict=True)
+
+
+def test_role_models_extra_builders_are_a_reserve_pool():
+    # best_of_n=2 with 3 builders: active is the first 2, but the 3rd is a live reserve the campaign
+    # preflight can substitute in — not dead weight.
+    roles = RoleModels(("a", "b", "c"), "reviewer", best_of_n=2)
+    assert roles.active_builders == ("a", "b") and roles.builders == ("a", "b", "c")
 
 
 def test_execution_waves_parallelize_independent_areas_and_respect_dependencies():
@@ -385,3 +396,58 @@ def test_final_reviewer_invalid_output_retries_before_handoff(monkeypatch):
         "base",
     )
     assert rr.decision == "accept" and not rr.escalated
+
+
+def _rows(**live):
+    from preflight import ReadyRow
+    return [ReadyRow(m, "builders", ok, "env" if ok else "", "standard") for m, ok in live.items()]
+
+
+def test_campaign_preflight_substitutes_reserve_for_unavailable_primary(monkeypatch):
+    # builders=[a,b,c] best_of_n=2: primary "a" unavailable -> substitute reserve, active becomes b,c;
+    # "a" is recorded as dropped (never silent).
+    from campaign import _select_campaign_builders, RoleModels
+    monkeypatch.setattr(campaign, "readiness",
+                        lambda *a, **k: _rows(a=False, b=True, c=True, reviewer=True))
+    roles = RoleModels(("a", "b", "c"), "reviewer", best_of_n=2)
+    new_roles, dropped = _select_campaign_builders(
+        roles, _profile(), {}, reviewer_fn=None, env={}, runner=None, strict=False)
+    assert new_roles.builders == ("b", "c") and new_roles.active_builders == ("b", "c")
+    assert dropped == ("a",)
+
+
+def test_campaign_preflight_degrades_to_single_and_reports(monkeypatch):
+    from campaign import _select_campaign_builders, RoleModels
+    monkeypatch.setattr(campaign, "readiness",
+                        lambda *a, **k: _rows(a=True, b=False, reviewer=True))
+    new_roles, dropped = _select_campaign_builders(
+        RoleModels(("a", "b"), "reviewer", best_of_n=2), _profile(), {},
+        reviewer_fn=None, env={}, runner=None, strict=False)
+    assert new_roles.builders == ("a",) and dropped == ("b",)
+
+
+def test_campaign_preflight_strict_refuses_substitution(monkeypatch):
+    from campaign import _select_campaign_builders, RoleModels
+    monkeypatch.setattr(campaign, "readiness",
+                        lambda *a, **k: _rows(a=False, b=True, c=True, reviewer=True))
+    with pytest.raises(CampaignError, match="no substitution performed"):
+        _select_campaign_builders(RoleModels(("a", "b", "c"), "reviewer", best_of_n=2, strict=True),
+                                  _profile(), {}, reviewer_fn=None, env={}, runner=None, strict=True)
+
+
+def test_campaign_preflight_raises_when_all_builders_unavailable(monkeypatch):
+    from campaign import _select_campaign_builders, RoleModels
+    monkeypatch.setattr(campaign, "readiness",
+                        lambda *a, **k: _rows(a=False, b=False, reviewer=True))
+    with pytest.raises(CampaignError, match="no configured Builder available"):
+        _select_campaign_builders(RoleModels(("a", "b"), "reviewer", best_of_n=2),
+                                  _profile(), {}, reviewer_fn=None, env={}, runner=None, strict=False)
+
+
+def test_campaign_preflight_requires_reviewer(monkeypatch):
+    from campaign import _select_campaign_builders, RoleModels
+    monkeypatch.setattr(campaign, "readiness",
+                        lambda *a, **k: _rows(a=True, b=True, reviewer=False))
+    with pytest.raises(CampaignError, match="Reviewer model unavailable"):
+        _select_campaign_builders(RoleModels(("a", "b"), "reviewer", best_of_n=2),
+                                  _profile(), {}, reviewer_fn=None, env={}, runner=None, strict=False)

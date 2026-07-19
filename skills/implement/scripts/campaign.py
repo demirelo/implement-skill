@@ -5,7 +5,7 @@ an optional best-of-N width (default 2). Independent Plan items run concurrently
 isolated PR worktrees; dependencies and predicted touched-area conflicts serialize automatically.
 """
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fnmatch import fnmatch
 import json
 import re
@@ -56,6 +56,7 @@ class RoleModels:
     builders: tuple[str, ...]
     reviewer: str
     best_of_n: int = 2
+    strict: bool = False    # strict: demand exactly best_of_n available; default degrades to what's live
 
     def __post_init__(self):
         unique = tuple(dict.fromkeys(str(x).strip() for x in self.builders if str(x).strip()))
@@ -67,7 +68,10 @@ class RoleModels:
             raise ValueError("one Reviewer model is required")
         if self.best_of_n < 1:
             raise ValueError("best_of_n must be at least 1")
-        if len(unique) < self.best_of_n:
+        # DEFAULT: a `builders` list longer than best_of_n is a candidate pool (extra models are live
+        # reserves that substitute when a primary is unavailable); a shorter list just runs fewer.
+        # Only strict mode demands an exact count up front.
+        if self.strict and len(unique) < self.best_of_n:
             raise ValueError(
                 f"best_of_n={self.best_of_n} requires at least {self.best_of_n} Builder models"
             )
@@ -146,6 +150,9 @@ class ItemResult:
 @dataclass
 class CampaignResult:
     items: dict[str, ItemResult]
+    # Builders dropped at campaign preflight (configured but unavailable) — substituted from the
+    # reserve, surfaced here so the campaign summary reports the degraded panel. Never silent.
+    degraded_builders: tuple = ()
 
     @property
     def total(self) -> int:
@@ -765,9 +772,37 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
         )
 
 
+def _select_campaign_builders(roles, profile, overrides, *, reviewer_fn, env, runner, strict):
+    """Preflight the FULL Builder pool and pick the live ones. DEFAULT: reserves substitute for
+    unavailable primaries; STRICT: any unavailable is a hard error (no substitution). The Reviewer is
+    always required (it does the adversarial review) unless a reviewer_fn is injected. Returns
+    (roles_with_live_builders, dropped_builders) — dropped is surfaced in the campaign summary."""
+    selected = dict(profile)
+    selected["panels"] = {
+        "architects": [] if reviewer_fn is not None else [roles.reviewer],
+        "builders": [x for x in roles.builders if x not in overrides],   # probe the whole pool
+    }
+    rows = readiness(selected, env=env, runner=runner)
+    live_map = {x.model: x.live for x in rows}
+    if reviewer_fn is None and not live_map.get(roles.reviewer, False):
+        raise CampaignError(f"Reviewer model unavailable: {roles.reviewer}")
+    live_builders = [b for b in roles.builders if b in overrides or live_map.get(b, False)]
+    unavailable = [b for b in roles.builders if b not in live_builders]
+    if strict and unavailable:
+        raise CampaignError(
+            f"strict: selected role model(s) unavailable; no substitution performed: {unavailable}"
+        )
+    if not live_builders:
+        raise CampaignError(
+            f"no configured Builder available for the campaign; all unavailable: {unavailable}"
+        )
+    return replace(roles, builders=tuple(live_builders)), tuple(unavailable)
+
+
 def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_of_n=None, profile=None,
                  reviewer_fn=None, builder_dispatchers=None, item_executor=None,
-                 runner=subprocess.run, env=None, trusted=False, parallel=True) -> CampaignResult:
+                 runner=subprocess.run, env=None, trusted=False, parallel=True,
+                 strict=False) -> CampaignResult:
     """Run a Plan as dependency-aware parallel PR workstreams.
 
     Users supply only the Plan and a model config:
@@ -794,27 +829,23 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
         if best_of_n is None:
             best_of_n = models.get("best_of_n", 2)
     width = 2 if best_of_n is None else int(best_of_n)
-    roles = RoleModels(tuple(builders or ()), str(reviewer or ""), width)
+    roles = RoleModels(tuple(builders or ()), str(reviewer or ""), width, strict=strict)
     profile = profile or load_profile(start=Path(repo)) or default_profile(_MODELS, _PROVIDERS)
     pool = profile.get("pool", {})
     overrides = builder_dispatchers or {}
-    missing_builders = [x for x in roles.active_builders if x not in pool and x not in overrides]
+    # check the FULL candidate pool (roles.builders), not just the first N — reserves must be
+    # configured too so they can substitute for an unavailable primary.
+    missing_builders = [x for x in roles.builders if x not in pool and x not in overrides]
     if missing_builders:
         raise CampaignError(f"Builder model(s) not configured: {missing_builders}")
     if roles.reviewer not in pool and reviewer_fn is None:
         raise CampaignError(f"Reviewer model not configured: {roles.reviewer}")
+    degraded_builders: tuple = ()
     if item_executor is None:
-        selected = dict(profile)
-        selected["panels"] = {
-            "architects": [] if reviewer_fn is not None else [roles.reviewer],
-            "builders": [x for x in roles.active_builders if x not in overrides],
-        }
-        rows = readiness(selected, env=env, runner=runner)
-        unavailable = [x.model for x in rows if not x.live]
-        if unavailable:
-            raise CampaignError(
-                f"selected role model(s) unavailable; no substitution performed: {unavailable}"
-            )
+        # DEGRADE: substitute reserves for unavailable primaries (default), or fail on any
+        # unavailable (strict). Dropped models flow to CampaignResult.degraded_builders → summary.
+        roles, degraded_builders = _select_campaign_builders(
+            roles, profile, overrides, reviewer_fn=reviewer_fn, env=env, runner=runner, strict=strict)
 
     results: dict[str, ItemResult] = {}
     pending = list(plan.items)
@@ -888,4 +919,4 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
         ran = {x.id for x in wave}
         pending = [x for x in pending if x.id not in ran]
 
-    return CampaignResult(items=results)
+    return CampaignResult(items=results, degraded_builders=degraded_builders)

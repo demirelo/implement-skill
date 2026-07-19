@@ -112,3 +112,22 @@ def test_render_pr_body_omits_trace_section_when_none():
     body = render_pr_body(goal="g", consensus_notes="c", acceptance_k=1, acceptance_n=1,
                           review=_round(), tier_label="green")
     assert "Decision trace" not in body
+
+
+def test_pr_body_reports_unavailable_and_failed_builders():
+    from handoff import render_pr_body
+
+    class R:  # empty ReviewRound-like
+        routed = []
+        escalated = []
+        advisory = []
+
+    trace = {"winner": "a", "margin": None, "winner_size": 1, "unavailable": ["dead"],
+             "candidates": [{"name": "a", "status": "green", "turns": 1, "diff_size": 1,
+                             "why_stopped": "green at turn 1", "winner": True, "reverted": []},
+                            {"name": "boom", "status": "failed", "turns": 0, "diff_size": 0,
+                             "why_stopped": "DispatchError: 1Password locked", "winner": False, "reverted": []}]}
+    body = render_pr_body(goal="g", consensus_notes="c", acceptance_k=3, acceptance_n=3,
+                          review=R(), tier_label="green", trace=trace)
+    assert "unavailable this run — skipped, not substituted: dead" in body
+    assert "failed mid-run (candidate dropped): boom" in body

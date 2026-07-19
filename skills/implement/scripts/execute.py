@@ -230,6 +230,9 @@ class BestResult:
     turns: int
     applied: bool = False
     candidates: dict = field(default_factory=dict)
+    # Builders that were requested but unavailable at preflight, so never dispatched. Distinct from
+    # a candidate that failed mid-run (that lands in `candidates` with success=False + an error).
+    unavailable: tuple = ()
 
 
 def _diff_size(diff) -> int:
@@ -298,7 +301,8 @@ def decision_trace(best: BestResult) -> dict:
     winner_size = green_sizes.get(winner) if winner else None
     runners_up = [s for n, s in green_sizes.items() if n != winner]
     margin = (min(runners_up) - winner_size) if (winner_size is not None and runners_up) else None
-    return {"winner": winner, "margin": margin, "winner_size": winner_size, "candidates": candidates}
+    return {"winner": winner, "margin": margin, "winner_size": winner_size,
+            "candidates": candidates, "unavailable": list(best.unavailable)}
 
 
 _DISPATCH = Path(__file__).parent / "team_dispatch.py"

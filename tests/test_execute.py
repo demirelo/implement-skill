@@ -558,3 +558,12 @@ def test_force_turn_dispatches_even_when_baseline_is_green():
     )
     assert res.success is True and res.turns == 1
     assert called
+
+
+def test_decision_trace_surfaces_preflight_unavailable_builders():
+    from execute import BestResult, decision_trace, LoopResult
+    best = BestResult(winner="a", diff="x", turns=1, applied=True,
+                      candidates={"a": LoopResult(success=True, turns=1, diff="x")},
+                      unavailable=("dead",))
+    t = decision_trace(best)
+    assert t["unavailable"] == ["dead"]

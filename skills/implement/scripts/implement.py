@@ -47,7 +47,7 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
                   privacy=False, runner=subprocess.run, env=None, max_turns=6, trusted=False,
                   ledger_path=None, builders=None, dispatcher_overrides=None,
                   force_turn=False, repo_ctx=None, best_of_n=None,
-                  required_paths=(), required_paths_must_change=True):
+                  required_paths=(), required_paths_must_change=True, strict=False):
     if profile is None:
         profile = load_profile(start=start, home=home) or default_profile(_MODELS, _PROVIDERS)
     dispatcher_overrides = dispatcher_overrides or {}
@@ -102,21 +102,32 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     bucket = features.bucket(task_brief, adapter)
     requested_builders = list(panels.get("builders", []))
     live_builders = [m for m in requested_builders if live.get(m) or m in dispatcher_overrides]
+    unavailable_builders: list = []
     if builders is not None:
-        unavailable = [m for m in requested_builders if m not in live_builders]
-        if unavailable:
-            raise RuntimeError(
-                f"configured Builder model(s) unavailable: {unavailable}; "
-                "the campaign never substitutes models silently"
-            )
+        unavailable_builders = [m for m in requested_builders if m not in live_builders]
         width = 2 if best_of_n is None else int(best_of_n)
         if width < 1:
             raise ValueError("best_of_n must be at least 1")
-        if len(live_builders) < width:
+        if strict:
+            # reproducible campaign: exactly the configured models, or fail — never substitute/shrink.
+            if unavailable_builders:
+                raise RuntimeError(
+                    f"strict: configured Builder model(s) unavailable: {unavailable_builders}; "
+                    "no substitution performed"
+                )
+            if len(live_builders) < width:
+                raise RuntimeError(
+                    f"strict best_of_n={width} requires at least {width} available configured "
+                    f"Builders; got {len(live_builders)}"
+                )
+        elif not live_builders:
+            # degrade default still needs at least one live Builder to build anything
             raise RuntimeError(
-                f"best_of_n={width} requires at least {width} available configured Builders; "
-                f"got {len(live_builders)}"
+                f"no configured Builder available (requested {requested_builders}); all unavailable"
             )
+        # degrade default: run up to `width` live Builders in the requested order — a candidate list
+        # longer than N naturally substitutes, and a short/partly-dead list just runs fewer (>=1).
+        # The dropped models are reported (best.unavailable) so degradation is never silent.
         live_builders = live_builders[:width]
     elif len(live_builders) > 1:   # M5: rank defaults; explicit campaign roles preserve user order
         ranked = router.rank(bucket, live_builders, _load_priors(),
@@ -150,6 +161,7 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
                          panel_context=panel_ctx, repo_ctx=repo_ctx,
                          force_turn=force_turn, required_paths=required_paths,
                          required_paths_must_change=required_paths_must_change)
+    best.unavailable = tuple(unavailable_builders)   # dropped-at-preflight Builders → surfaced in the PR
     outcomes.log_run(best, bucket, list(dispatchers), path=ledger_path)   # learn from this run
     if panel_ctx is not None:
         continuity.record_run(repo_path, best, bucket, list(dispatchers), home=home)

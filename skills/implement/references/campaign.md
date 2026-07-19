@@ -7,13 +7,21 @@ Use this reference whenever `/implement` receives a Plan with more than one impl
 The user supplies the Plan and model roles:
 
 ```yaml
-builders: [minimax, luna]
+builders: [minimax, luna, kimi]   # a candidate pool — may be longer than best_of_n
 reviewer: sol
 best_of_n: 2
 ```
 
-The width defaults to 2. The configured list must contain at least N Builders. Model selection is
-literal: use the first N models in the user's order and never substitute silently.
+The width defaults to 2. **`builders` is a candidate pool, not a fixed set.** Selection order is the
+user's; the first `best_of_n` **available** Builders run each item. If a primary is unavailable at
+preflight, the next live model in the list **substitutes** for it; a shorter (or partly-dead) list
+just runs fewer — the campaign proceeds as long as **≥1** Builder is live (the Reviewer must always
+be available). Degradation is **never silent**: dropped models are recorded on
+`CampaignResult.degraded_builders`, and per-item drops on `BestResult.unavailable` — surface both in
+the campaign summary and each PR's "decisions / risks" section. A Builder that dies *mid-run* is
+likewise dropped (its candidate fails; the others continue). Pass `strict=True` (or
+`RoleModels(..., strict=True)`) for reproducible campaigns: exactly `best_of_n` available or fail,
+no substitution.
 
 ## Plan normalization
 
