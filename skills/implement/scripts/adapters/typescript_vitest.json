@@ -2,6 +2,7 @@
   "name": "typescript-vitest",
   "detect": ["vitest.config.ts", "vitest.config.js", "vitest.config.mts", "vitest.config.mjs", "vitest.workspace.ts", "vite.config.ts", "pnpm-workspace.yaml", "package.json"],
   "test_layout": "*.test.ts / *.spec.ts colocated with source or under __tests__/; describe()/it()/test() blocks with expect() assertions (vitest globals, or explicit `import { describe, it, expect } from 'vitest'`)",
+  "oracle_globs": ["**/*.test.ts", "**/*.spec.ts", "**/*.test.js", "**/*.spec.js"],
   "test_cmd": "npx vitest run --reporter=dot --no-color",
   "test_one": "npx vitest run --reporter=dot --no-color {path}",
   "timeout": 900,

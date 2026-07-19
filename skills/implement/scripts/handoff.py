@@ -67,6 +67,13 @@ def render_pr_body(*, goal, consensus_notes, acceptance_k, acceptance_n, review,
         decisions.append(f"- {len(review.escalated)} finding(s) need human verification (untouched code)")
     if acceptance_k < acceptance_n:
         decisions.append(f"- acceptance not fully green: {acceptance_k}/{acceptance_n}")
+    if trace:   # degraded panel — Builders dropped at preflight or that crashed mid-run
+        unavail = list(trace.get("unavailable", []))
+        failed = [c["name"] for c in trace.get("candidates", []) if c.get("status") == "failed"]
+        if unavail:
+            decisions.append(f"- Builder(s) unavailable this run — skipped, not substituted: {', '.join(unavail)}")
+        if failed:
+            decisions.append(f"- Builder(s) that failed mid-run (candidate dropped): {', '.join(failed)}")
     decisions_md = "\n".join(decisions) if decisions else "- None — ready for review."
     summary = (f"{len(review.routed)} routed · {len(review.escalated)} escalated · "
                f"{len(review.advisory)} advisory")

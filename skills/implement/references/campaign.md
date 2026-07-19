@@ -7,13 +7,21 @@ Use this reference whenever `/implement` receives a Plan with more than one impl
 The user supplies the Plan and model roles:
 
 ```yaml
-builders: [minimax, luna]
+builders: [minimax, luna, kimi]   # a candidate pool — may be longer than best_of_n
 reviewer: sol
 best_of_n: 2
 ```
 
-The width defaults to 2. The configured list must contain at least N Builders. Model selection is
-literal: use the first N models in the user's order and never substitute silently.
+The width defaults to 2. **`builders` is a candidate pool, not a fixed set.** Selection order is the
+user's; the first `best_of_n` **available** Builders run each item. If a primary is unavailable at
+preflight, the next live model in the list **substitutes** for it; a shorter (or partly-dead) list
+just runs fewer — the campaign proceeds as long as **≥1** Builder is live (the Reviewer must always
+be available). Degradation is **never silent**: dropped models are recorded on
+`CampaignResult.degraded_builders`, and per-item drops on `BestResult.unavailable` — surface both in
+the campaign summary and each PR's "decisions / risks" section. A Builder that dies *mid-run* is
+likewise dropped (its candidate fails; the others continue). Pass `strict=True` (or
+`RoleModels(..., strict=True)`) for reproducible campaigns: exactly `best_of_n` available or fail,
+no substitution.
 
 ## Plan normalization
 
@@ -49,8 +57,12 @@ separate worktrees.
 1. Fetch/prune the remote base; never reset or pull over the operator's working checkout.
 2. Inspect open PRs and remote branches for matching files/scope.
 3. Create `implement/<item-id>-<slug>` in `.worktrees/pr-<item-id>`.
+   For Lean, copy the root checkout's pre-hydrated `.lake` closure into the isolated worktree; never
+   fetch dependencies from a Builder or inside the sandbox.
 4. Run `implement.run_implement(..., builders=..., best_of_n=N, force_turn=True)`.
 5. Require a non-vacuous full local gate and a behavior-test diff.
+   A Lean full gate means `lake build` plus elaboration of every adapter-declared acceptance module,
+   not merely a successful default Lake target.
 6. Run the configured Reviewer through `review.build_final_review_prompt` and
    `review.parse_final_review`.
 7. Route objective blockers back through the same Best-of-N configuration; re-gate and re-review.

@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from gate import detect_adapter
+from gate import detect_adapter, oracle_paths
 from execute import run_best_of_n
 from preflight import readiness, enforce_privacy
 from backends import make_dispatcher, PrivacyViolation, UnsupportedBackend
@@ -13,6 +13,8 @@ from seed import default_profile
 from suitability import assess as assess_suitability
 from sandbox import choose_backend, available_backends, wrap as sandbox_wrap
 from kill import KillCriteria
+from lean_support import is_lean_adapter, preflight_lean
+from sandbox import SandboxUnavailable
 import continuity
 import features
 import outcomes
@@ -22,6 +24,10 @@ _HERE = Path(__file__).resolve().parent   # resolve() so the repo-relative reads
 _MODELS = json.loads((_HERE / "models.json").read_text())
 _PROVIDERS = json.loads((_HERE / "providers.json").read_text())
 _PRIOR_ALIAS = {"venice-glm": "glm"}   # privacy-lane Builder shares its model's cold-start prior
+
+
+def _acceptance_tests(repo_path, adapter) -> list[str]:
+    return [str(path) for path in oracle_paths(repo_path, adapter)]
 
 
 def _load_priors() -> dict:
@@ -40,7 +46,8 @@ def _load_priors() -> dict:
 def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
                   privacy=False, runner=subprocess.run, env=None, max_turns=6, trusted=False,
                   ledger_path=None, builders=None, dispatcher_overrides=None,
-                  force_turn=False, repo_ctx=None, best_of_n=None):
+                  force_turn=False, repo_ctx=None, best_of_n=None,
+                  required_paths=(), required_paths_must_change=True, strict=False):
     if profile is None:
         profile = load_profile(start=start, home=home) or default_profile(_MODELS, _PROVIDERS)
     dispatcher_overrides = dispatcher_overrides or {}
@@ -61,19 +68,25 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     if privacy or profile.get("prefs", {}).get("privacy_default"):
         profile, privacy = enforce_privacy(profile), True
     adapter = detect_adapter(repo_path)
+    if is_lean_adapter(adapter):
+        preflight_lean(repo_path)
     # suitability filter — refuse autonomous mode without an objective oracle (a green would be vacuous).
-    # Exclude generated/stale dirs so a leftover .worktrees/ candidate copy can't fake an oracle.
-    _skip = {"__pycache__", ".worktrees", ".venv", "venv", "node_modules"}
-    acceptance_tests = [str(p) for p in Path(repo_path).rglob("test_*.py")
-                        if not _skip.intersection(p.parts)]
+    acceptance_tests = _acceptance_tests(repo_path, adapter)
     suit = assess_suitability(adapter=adapter, acceptance_tests=acceptance_tests)
     if not suit.autonomous_ok:
         raise RuntimeError("refusing autonomous run (no objective oracle): " + "; ".join(suit.reasons))
     # H6 — pick a sandbox backend (raises SandboxUnavailable if untrusted + no backend); wrap the gate
     backend = choose_backend(trusted=trusted, available=available_backends())
+    docker_image = adapter.get("docker_image")
+    if is_lean_adapter(adapter) and backend == "docker" and not docker_image:
+        raise SandboxUnavailable(
+            "Lean/Lake gate selected Docker, but the adapter has no explicitly pinned "
+            "docker_image; refusing to fall back to the Python gate image"
+        )
 
     def _wrap(argv, workdir):
-        return sandbox_wrap(argv, backend=backend, workdir=workdir)
+        kwargs = {"image": docker_image} if docker_image else {}
+        return sandbox_wrap(argv, backend=backend, workdir=workdir, **kwargs)
 
     live = {r.model: r.live for r in readiness(profile, env=env, runner=runner)}
     pool, panels = profile.get("pool", {}), profile.get("panels", {})
@@ -89,21 +102,32 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     bucket = features.bucket(task_brief, adapter)
     requested_builders = list(panels.get("builders", []))
     live_builders = [m for m in requested_builders if live.get(m) or m in dispatcher_overrides]
+    unavailable_builders: list = []
     if builders is not None:
-        unavailable = [m for m in requested_builders if m not in live_builders]
-        if unavailable:
-            raise RuntimeError(
-                f"configured Builder model(s) unavailable: {unavailable}; "
-                "the campaign never substitutes models silently"
-            )
+        unavailable_builders = [m for m in requested_builders if m not in live_builders]
         width = 2 if best_of_n is None else int(best_of_n)
         if width < 1:
             raise ValueError("best_of_n must be at least 1")
-        if len(live_builders) < width:
+        if strict:
+            # reproducible campaign: exactly the configured models, or fail — never substitute/shrink.
+            if unavailable_builders:
+                raise RuntimeError(
+                    f"strict: configured Builder model(s) unavailable: {unavailable_builders}; "
+                    "no substitution performed"
+                )
+            if len(live_builders) < width:
+                raise RuntimeError(
+                    f"strict best_of_n={width} requires at least {width} available configured "
+                    f"Builders; got {len(live_builders)}"
+                )
+        elif not live_builders:
+            # degrade default still needs at least one live Builder to build anything
             raise RuntimeError(
-                f"best_of_n={width} requires at least {width} available configured Builders; "
-                f"got {len(live_builders)}"
+                f"no configured Builder available (requested {requested_builders}); all unavailable"
             )
+        # degrade default: run up to `width` live Builders in the requested order — a candidate list
+        # longer than N naturally substitutes, and a short/partly-dead list just runs fewer (>=1).
+        # The dropped models are reported (best.unavailable) so degradation is never silent.
         live_builders = live_builders[:width]
     elif len(live_builders) > 1:   # M5: rank defaults; explicit campaign roles preserve user order
         ranked = router.rank(bucket, live_builders, _load_priors(),
@@ -135,7 +159,9 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     best = run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=max_turns,
                          wrap=_wrap, crit=KillCriteria(max_turns=max_turns),
                          panel_context=panel_ctx, repo_ctx=repo_ctx,
-                         force_turn=force_turn)
+                         force_turn=force_turn, required_paths=required_paths,
+                         required_paths_must_change=required_paths_must_change)
+    best.unavailable = tuple(unavailable_builders)   # dropped-at-preflight Builders → surfaced in the PR
     outcomes.log_run(best, bucket, list(dispatchers), path=ledger_path)   # learn from this run
     if panel_ctx is not None:
         continuity.record_run(repo_path, best, bucket, list(dispatchers), home=home)

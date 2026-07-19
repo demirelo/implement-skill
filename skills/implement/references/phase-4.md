@@ -45,7 +45,9 @@ start from the PR diff and acceptance context so they keep independent judgment.
      before accepting), else `"accept"`.
 5. **Re-gate the winner:** `rg = review.re_gate(repo, winner_diff, adapter)` re-applies the winner
    on a clean baseline and re-runs the gate, rolling back if it isn't green. Refuse a **false green**
-   with `review.junit_executed_count(junit_xml)` — a green with zero executed tests is not green.
+   using `GateResult.verified_count` — a green with zero executed objective checks is not green.
+   Pytest derives this from executed tests; Lean derives it from acceptance modules elaborated after
+   the project build. `review.junit_executed_count` remains available for JUnit artifact inspection.
 
 **Secrets boundary:** the winner diff + gate stdout are the highest-risk payload — scrub before every
 Architect dispatch. `arch.ask` does this automatically; for the `mcp__codex__codex` security lens you

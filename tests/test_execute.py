@@ -27,6 +27,16 @@ NOOP_PATCH = (
     "+# noop\n"
 )
 
+MULTIPLY_FIX_WITH_ARTIFACT = MULTIPLY_FIX + (
+    "diff --git a/RESULT.md b/RESULT.md\n"
+    "new file mode 100644\n"
+    "index 0000000..8d617e5\n"
+    "--- /dev/null\n"
+    "+++ b/RESULT.md\n"
+    "@@ -0,0 +1 @@\n"
+    "+# Result\n"
+)
+
 
 def test_inner_loop_reaches_green_in_one_turn():
     work = _copy_repo(FIXTURE)
@@ -68,6 +78,71 @@ def test_failure_is_fed_back_into_next_prompt():
     assert result.success is True
     assert "still failing" in prompts[1]
     assert "# noop" not in (Path(work) / "mathx" / "ops.py").read_text()  # failed turn fully reverted
+
+
+def test_required_artifacts_reject_partial_green_patch_and_retry():
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    prompts = []
+
+    def partial_then_complete(prompt):
+        prompts.append(prompt)
+        return MULTIPLY_FIX if len(prompts) == 1 else MULTIPLY_FIX_WITH_ARTIFACT
+
+    result = run_inner_loop(
+        work,
+        "add multiply() and the result document",
+        adapter,
+        partial_then_complete,
+        max_turns=2,
+        required_paths=("RESULT.md",),
+    )
+
+    assert result.success is True
+    assert result.turns == 2
+    assert "missing required artifacts: RESULT.md" in prompts[1]
+    assert (Path(work) / "RESULT.md").read_text() == "# Result\n"
+
+
+def test_required_artifacts_can_be_existence_only_for_repair():
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    strict = run_inner_loop(
+        work,
+        "add multiply()",
+        adapter,
+        lambda _prompt: MULTIPLY_FIX,
+        max_turns=1,
+        required_paths=("pyproject.toml",),
+    )
+    assert strict.success is False
+    assert "required artifacts not changed: pyproject.toml" in strict.ledger[0]
+
+    repair_work = _copy_repo(FIXTURE)
+    repair = run_inner_loop(
+        repair_work,
+        "add multiply()",
+        detect_adapter(repair_work),
+        lambda _prompt: MULTIPLY_FIX,
+        max_turns=1,
+        required_paths=("pyproject.toml",),
+        required_paths_must_change=False,
+    )
+    assert repair.success is True
+
+
+def test_required_artifacts_reject_path_traversal():
+    import pytest
+
+    work = _copy_repo(FIXTURE)
+    with pytest.raises(ValueError, match="safe repository-relative"):
+        run_inner_loop(
+            work,
+            "x",
+            detect_adapter(work),
+            lambda _prompt: MULTIPLY_FIX,
+            required_paths=("../outside",),
+        )
 
 
 VERBOSE_FIX = (
@@ -315,9 +390,9 @@ def test_two_tier_skips_full_suite_while_scoped_is_red(monkeypatch):
         seq.append("scoped" if only else "full")
         if only is None:
             return (GateResult(passed=False, failing_tests=["t::a"]) if seq.count("full") == 1
-                    else GateResult(passed=True, passing_count=3))
+                    else GateResult(passed=True, passing_count=3, verified_count=3))
         return (GateResult(passed=False, failing_tests=["t::a"]) if seq.count("scoped") == 1
-                else GateResult(passed=True, passing_count=1))
+                else GateResult(passed=True, passing_count=1, verified_count=1))
 
     monkeypatch.setattr(execute, "run_gate", fake_gate)
     monkeypatch.setattr(execute, "apply_patch",
@@ -396,6 +471,26 @@ def test_copy_repo_includes_gitignored_non_heavy_files(tmp_path):
     assert not (Path(work) / "__pycache__").exists()                                # heavy dir skipped
 
 
+def test_copy_repo_hydrates_lake_cache_without_tracking_or_prompting_it(tmp_path):
+    import subprocess
+    from execute import _repo_context, _reset
+    src = tmp_path / "lean"
+    (src / ".lake" / "packages" / "mathlib").mkdir(parents=True)
+    (src / ".lake" / "packages" / "mathlib" / "Cache.lean").write_text("CACHE_SECRET\n")
+    (src / "Main.lean").write_text("def visible : Nat := 1\n")
+    work = _copy_repo(src)
+    assert (Path(work) / ".lake" / "packages" / "mathlib" / "Cache.lean").exists()
+    tracked = subprocess.run(["git", "ls-files", ".lake"], cwd=work,
+                             capture_output=True, text=True, check=True).stdout
+    assert tracked == ""
+    context = _repo_context(work)
+    assert "def visible" in context and "CACHE_SECRET" not in context
+    (Path(work) / "junk.txt").write_text("remove")
+    _reset(work)
+    assert not (Path(work) / "junk.txt").exists()
+    assert (Path(work) / ".lake" / "packages" / "mathlib" / "Cache.lean").exists()
+
+
 def test_best_of_n_candidates_are_isolated_copies():
     # each candidate mutates its OWN copy; a losing diff must not leak into another candidate's tree
     from execute import run_best_of_n
@@ -463,3 +558,12 @@ def test_force_turn_dispatches_even_when_baseline_is_green():
     )
     assert res.success is True and res.turns == 1
     assert called
+
+
+def test_decision_trace_surfaces_preflight_unavailable_builders():
+    from execute import BestResult, decision_trace, LoopResult
+    best = BestResult(winner="a", diff="x", turns=1, applied=True,
+                      candidates={"a": LoopResult(success=True, turns=1, diff="x")},
+                      unavailable=("dead",))
+    t = decision_trace(best)
+    assert t["unavailable"] == ["dead"]

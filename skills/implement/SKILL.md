@@ -16,15 +16,21 @@ Accept only:
 2. A model configuration:
 
 ```yaml
-builders: [model-a, model-b]
+builders: [model-a, model-b, model-c]   # a candidate pool — may be longer than best_of_n
 reviewer: model-r
 best_of_n: 2
 ```
 
-`best_of_n` is optional and defaults to `2`. Require at least N configured Builder models. Preserve
-the user's Builder order and use exactly the first N configured models for every
-Best-of-N competition. Never add, replace, promote, or silently substitute a model. If a selected
-model is unavailable, report the blocked role and stop the affected workstream.
+`best_of_n` is optional and defaults to `2`. `builders` is a **candidate pool**: preserve the user's
+order and run the first `best_of_n` **available** Builders per Best-of-N competition. **Never stop
+building because one Builder is unavailable** — substitute the next live model from the pool; a
+shorter or partly-dead list simply runs fewer, proceeding as long as **≥1** Builder is live (the
+Reviewer must be available). A model that fails mid-run drops its candidate; the others finish.
+Substitution is **never silent**: report every dropped/failed Builder in the affected PR's
+"decisions / risks" section and in the campaign summary (`BestResult.unavailable` /
+`CampaignResult.degraded_builders`). Only when **every** configured Builder is unavailable do you stop
+and report. For a reproducible campaign that must use exactly N specific models, pass `strict=True`
+(then any unavailable model is a hard stop).
 
 Do not ask the user to choose serial versus parallel execution. Parallel PR workstreams are the
 default. The user may explicitly request serial execution as an override (`parallel=False`).
@@ -90,6 +96,8 @@ Before starting an item:
 - inspect open PRs and remote branches for matching scope or touched files;
 - read panel memory for known issues, rejected approaches, and accepted decisions;
 - record the base SHA and overlap result in the PR notes.
+- when the adapter is `lean-lake`, satisfy the exact-toolchain, committed-manifest, and hydrated
+  dependency preflight in `references/lean.md` before any model call.
 
 During implementation:
 
@@ -153,5 +161,6 @@ Count an item complete only when its PR is ready with all required gates satisfi
 - `references/panel-continuity.md` — Builder memory and fresh-review separation.
 - `references/guardrails.md` — sandbox, oracle, command, worktree, and stop conditions.
 - `references/phase-1.md` — acceptance-test oracle rules.
+- `references/lean.md` — Lean/Lake toolchain, oracle, cache, sandbox, and gate contract.
 - `references/credentials.md` / `references/onboarding.md` — model pool and credential setup.
 - `scripts/implement.py` / `scripts/execute.py` — single-item Best-of-N primitive used by campaigns.

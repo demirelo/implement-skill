@@ -4,7 +4,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "
 from review import (Finding, Loc, dedup, severity_tag,
                     route_decision, re_gate, junit_executed_count,
                     build_final_review_prompt, parse_final_review)
-from gate import detect_adapter
+from gate import GateResult, detect_adapter
 from execute import _copy_repo
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
@@ -103,6 +103,16 @@ def test_re_gate_passes_on_green_winner_diff():
               "     return a + b\n+\n+def multiply(a, b):\n+    return a * b\n")
     rg = re_gate(work, winner, adapter)
     assert rg.passed is True and rg.executed > 0
+
+
+def test_re_gate_uses_adapter_verified_count_not_pytest_text(monkeypatch):
+    import review
+    monkeypatch.setattr(review, "apply_patch", lambda *_a, **_k: type("A", (), {"ok": True})())
+    monkeypatch.setattr(review, "run_gate", lambda *_a, **_k:
+                        GateResult(passed=True, stdout="Build completed successfully\n",
+                                   verified_count=2))
+    rg = review.re_gate("/tmp/repo", "diff", {"name": "lean-lake"})
+    assert rg.passed is True and rg.executed == 2
 
 
 def test_re_gate_rolls_back_non_green_winner():

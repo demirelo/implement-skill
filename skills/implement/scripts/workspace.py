@@ -1,15 +1,17 @@
 """H7/H8 — git worktree isolation. Candidates run in an in-project .worktrees/<id> over TRACKED files
 (no .venv/build copy), never the live working tree; reset is scoped to the worktree (incl. ignored
 files via -x) and HARD-REFUSES to run on anything that isn't a linked worktree, so a caller bug can
-never destroy the operator's live tree. repo_context reads git-tracked *.py only, scrubs each file,
+never destroy the operator's live tree. repo_context reads tracked source/config files only, scrubs each file,
 budgets the total, and tolerates decode errors."""
 import re
 import subprocess
 from pathlib import Path
 
 from scrub import is_secret_file, scrub, env_secrets
+from lean_support import hydrate_lean_cache
 
-_HEAVY = {".git", ".venv", "venv", "node_modules", "dist", "build", "__pycache__", ".worktrees"}
+_HEAVY = {".git", ".lake", ".venv", "venv", "node_modules", "dist", "build", "__pycache__", ".worktrees"}
+_CONTEXT_SPECS = ("*.py", "*.lean", "lakefile.toml", "lakefile.lean", "lean-toolchain")
 _WID_OK = re.compile(r"[^A-Za-z0-9._-]")
 _BRANCH_OK = re.compile(r"^[A-Za-z0-9._/-]+$")
 
@@ -23,6 +25,7 @@ def create_worktree(repo, wid, *, base="HEAD", runner=subprocess.run) -> str:
     path = str(Path(repo) / ".worktrees" / safe_wid)
     runner(["git", "-C", str(repo), "worktree", "add", "--detach", "-q", path, base],
            capture_output=True, text=True, check=True)
+    hydrate_lean_cache(repo, path)
     return path
 
 
@@ -38,6 +41,7 @@ def create_branch_worktree(repo, wid, branch, *, base="HEAD", runner=subprocess.
     path = str(Path(repo) / ".worktrees" / f"pr-{safe_wid}")
     runner(["git", "-C", str(repo), "worktree", "add", "-b", str(branch), path, str(base)],
            capture_output=True, text=True, check=True)
+    hydrate_lean_cache(repo, path)
     return path
 
 
@@ -54,7 +58,8 @@ def _assert_linked_worktree(path, runner) -> None:
 def reset_worktree(path, runner=subprocess.run) -> None:
     _assert_linked_worktree(path, runner)
     runner(["git", "-C", str(path), "reset", "--hard", "-q", "HEAD"], capture_output=True, text=True, check=True)
-    runner(["git", "-C", str(path), "clean", "-fdxq"], capture_output=True, text=True, check=True)
+    runner(["git", "-C", str(path), "clean", "-fdxq", "-e", ".lake/"],
+           capture_output=True, text=True, check=True)
 
 
 def remove_worktree(repo, path, runner=subprocess.run) -> None:
@@ -73,7 +78,8 @@ def remove_merged_worktree(repo, path, branch, runner=subprocess.run) -> None:
 
 def repo_context(path, *, max_chars=12000, ignore=_HEAVY, runner=subprocess.run, secrets=None) -> str:
     sec = list(env_secrets() if secrets is None else secrets)
-    proc = runner(["git", "-C", str(path), "ls-files", "*.py"], capture_output=True, text=True)
+    proc = runner(["git", "-C", str(path), "ls-files", "--", *_CONTEXT_SPECS],
+                  capture_output=True, text=True)
     files = proc.stdout.split() if proc.returncode == 0 else []   # TRACKED files only (H8)
     chunks = []
     for rel in files:

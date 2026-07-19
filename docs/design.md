@@ -93,7 +93,7 @@ PHASE 5 — HAND OFF / AUTO-MERGE
   Never bypasses branch protection (no --admin). autonomy=handoff → always leave the PR.
 ```
 
-**Gate-language invariant:** the acceptance tests Architects authors and the loop runs **always live in and use the *target repo's* language and test framework** (pytest for a Python repo, vitest for TS, `forge test` for Solidity…). A gate in the wrong language never executes — it's a vacuous/fake green, not ground truth. So a "gate adapter" specifies not just the run/lint/typecheck commands but the *test-authoring convention* (where tests live, naming, idioms); **detecting the repo's language + framework is step 0 of every run.** The engine/harness itself is separate (written in Python, reusing `team-dispatch.py`) — that is an implementation detail, not the gate language.
+**Gate-language invariant:** the acceptance tests Architects authors and the loop runs **always live in and use the *target repo's* language and test framework** (pytest for a Python repo, vitest for TS, `forge test` for Solidity…). A gate in the wrong language never executes — it's a vacuous/fake green, not ground truth. So a "gate adapter" specifies not just the run/lint/typecheck commands but the *test-authoring convention* (where tests live, naming, idioms); **detecting the repo's language + framework is step 0 of every run.** Compiler-oriented adapters also define objective-check execution: Lean runs `lake build` and then elaborates every declared acceptance module because a default Lake build need not include `Tests/`. The engine/harness itself is separate (written in Python, reusing `team-dispatch.py`) — that is an implementation detail, not the gate language.
 
 ## 5. Execution mechanic — v1 vs v2
 

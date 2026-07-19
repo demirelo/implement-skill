@@ -1,0 +1,19 @@
+{
+  "name": "lean-lake",
+  "detect": ["lean-toolchain", "lakefile.toml", "lakefile.lean", "lake-manifest.json"],
+  "required_any": ["lakefile.toml", "lakefile.lean"],
+  "test_layout": "Lean acceptance modules under Tests/**/*.lean, Test/**/*.lean, or files named *Test.lean/*Tests.lean",
+  "oracle_globs": ["Tests/**/*.lean", "Test/**/*.lean", "**/*Test.lean", "**/*Tests.lean"],
+  "test_cmd": "lake build",
+  "test_one": "lake env lean {path}",
+  "test_one_batch": false,
+  "full_oracle_check": true,
+  "result_parser": "lean",
+  "verified_count": "oracle-files",
+  "failure_pattern": "(?m)^([^:\\n]+\\.lean):\\d+:\\d+: error:",
+  "malformed_pattern": "(?i)(unexpected token|unexpected end of input|unterminated|invalid syntax)",
+  "infrastructure_pattern": "(?i)(command not found|unknown executable|toolchain .+ is not installed|missing manifest|failed to load lake configuration)",
+  "timeout": 1200,
+  "lint_cmd": "lake build",
+  "type_cmd": "lake build"
+}

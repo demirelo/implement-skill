@@ -5,7 +5,7 @@ an optional best-of-N width (default 2). Independent Plan items run concurrently
 isolated PR worktrees; dependencies and predicted touched-area conflicts serialize automatically.
 """
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fnmatch import fnmatch
 import json
 import re
@@ -56,6 +56,7 @@ class RoleModels:
     builders: tuple[str, ...]
     reviewer: str
     best_of_n: int = 2
+    strict: bool = False    # strict: demand exactly best_of_n available; default degrades to what's live
 
     def __post_init__(self):
         unique = tuple(dict.fromkeys(str(x).strip() for x in self.builders if str(x).strip()))
@@ -67,7 +68,10 @@ class RoleModels:
             raise ValueError("one Reviewer model is required")
         if self.best_of_n < 1:
             raise ValueError("best_of_n must be at least 1")
-        if len(unique) < self.best_of_n:
+        # DEFAULT: a `builders` list longer than best_of_n is a candidate pool (extra models are live
+        # reserves that substitute when a primary is unavailable); a shorter list just runs fewer.
+        # Only strict mode demands an exact count up front.
+        if self.strict and len(unique) < self.best_of_n:
             raise ValueError(
                 f"best_of_n={self.best_of_n} requires at least {self.best_of_n} Builder models"
             )
@@ -85,6 +89,7 @@ class PlanItem:
     deps: tuple[str, ...] = ()
     acceptance: tuple[str, ...] = ()
     touched_areas: tuple[str, ...] = ()
+    required_paths: tuple[str, ...] = ()
     branch: str = ""
     tests_required: bool = True
 
@@ -100,6 +105,7 @@ class PlanItem:
             deps=tuple(str(x) for x in raw.get("deps", raw.get("dependencies", ()))),
             acceptance=tuple(str(x) for x in raw.get("acceptance", raw.get("criteria", ()))),
             touched_areas=tuple(str(x) for x in raw.get("touched_areas", raw.get("areas", ()))),
+            required_paths=tuple(str(x) for x in raw.get("required_paths", ())),
             branch=str(raw.get("branch", "")).strip(),
             tests_required=bool(raw.get("tests_required", True)),
         )
@@ -144,6 +150,9 @@ class ItemResult:
 @dataclass
 class CampaignResult:
     items: dict[str, ItemResult]
+    # Builders dropped at campaign preflight (configured but unavailable) — substituted from the
+    # reserve, surfaced here so the campaign summary reports the degraded panel. Never silent.
+    degraded_builders: tuple = ()
 
     @property
     def total(self) -> int:
@@ -292,6 +301,7 @@ def inspect_overlaps(repo, item: PlanItem, *, base="main", exclude_heads=(),
 
 def _task_brief(item: PlanItem, overlaps) -> str:
     acceptance = "\n".join(f"- {x}" for x in item.acceptance) or "- Implement the item as written."
+    required = "\n".join(f"- {x}" for x in item.required_paths) or "- No required artifact paths declared."
     overlap_lines = []
     for x in overlaps:
         if x.get("kind") == "branch":
@@ -307,16 +317,18 @@ def _task_brief(item: PlanItem, overlaps) -> str:
         f"Implement exactly one self-contained Plan item.\n\n"
         f"Item: {item.title}\n\nScope:\n{item.brief}\n\n"
         f"Acceptance:\n{acceptance}\n\n"
+        f"Required artifacts (every path must exist in this diff):\n{required}\n\n"
         f"Open-PR preflight:\n{overlap_notes}\n\n"
         "Add or update tests for every behavior change. Do not modify unrelated Plan items."
     )
 
 
 def _changed_files(repo, base_sha, runner) -> list[str]:
-    return [
-        x for x in _run(["git", "diff", "--name-only", base_sha, "--"], repo, runner).splitlines()
-        if x.strip()
-    ]
+    tracked = _run(["git", "diff", "--name-only", base_sha, "--"], repo, runner).splitlines()
+    untracked = _run(
+        ["git", "ls-files", "--others", "--exclude-standard"], repo, runner
+    ).splitlines()
+    return list(dict.fromkeys(x.strip() for x in tracked + untracked if x.strip()))
 
 
 def _has_test_change(paths) -> bool:
@@ -324,6 +336,11 @@ def _has_test_change(paths) -> bool:
         Path(x).name.startswith("test_")
         or "/tests/" in f"/{x}"
         or x.endswith((".spec.ts", ".test.ts", ".spec.js", ".test.js"))
+        or (
+            x.endswith(".lean")
+            and (set(part.lower() for part in Path(x).parts) & {"test", "tests"}
+                 or Path(x).stem.endswith(("Test", "Tests")))
+        )
         for x in paths
     )
 
@@ -344,15 +361,40 @@ def _reviewer(profile, reviewer, override, runner):
 def _verify_local(worktree):
     adapter = detect_adapter(worktree)
     gate = run_gate(worktree, adapter)
-    if not gate.passed or gate.passing_count <= 0:
+    if not gate.passed or gate.verified_count <= 0:
         raise CampaignError(f"local verification failed: {gate.summary}")
     return adapter, gate
+
+
+def _review_diff(worktree, base_sha, runner) -> str:
+    chunks = [_run(["git", "diff", "--binary", base_sha, "--"], worktree, runner)]
+    untracked = _run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"], worktree, runner
+    )
+    for raw in untracked.split("\0"):
+        rel = raw.strip()
+        path = Path(rel)
+        if not rel:
+            continue
+        if path.is_absolute() or ".." in path.parts:
+            raise CampaignError(f"unsafe untracked review path: {rel!r}")
+        proc = runner(
+            ["git", "diff", "--binary", "--no-index", "--", "/dev/null", rel],
+            cwd=str(worktree), capture_output=True, text=True,
+        )
+        if proc.returncode not in (0, 1):
+            raise CampaignError(
+                f"git diff --no-index failed: {(proc.stderr or '').strip()[:240]}"
+            )
+        if proc.stdout:
+            chunks.append(proc.stdout)
+    return "".join(chunks)
 
 
 def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispatchers,
                        runner, env, trusted, base_sha):
     for round_no in range(1, 4):
-        diff = _run(["git", "diff", "--binary", base_sha, "--"], worktree, runner)
+        diff = _review_diff(worktree, base_sha, runner)
         raw = review_fn(build_final_review_prompt(
             item_title=item.title,
             item_brief=item.brief,
@@ -378,6 +420,8 @@ def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispat
             best_of_n=roles.best_of_n,
             dispatcher_overrides=builder_dispatchers,
             force_turn=True,
+            required_paths=item.required_paths,
+            required_paths_must_change=False,
         )
         if not fix.winner or not fix.applied:
             raise CampaignError(f"review-fix round {round_no} produced no green candidate")
@@ -406,6 +450,8 @@ def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
         best_of_n=roles.best_of_n,
         dispatcher_overrides=builder_dispatchers,
         force_turn=True,
+        required_paths=item.required_paths,
+        required_paths_must_change=False,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the CI failure locally")
@@ -469,6 +515,8 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
         best_of_n=roles.best_of_n,
         dispatcher_overrides=builder_dispatchers,
         force_turn=True,
+        required_paths=item.required_paths,
+        required_paths_must_change=False,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the merge conflicts")
@@ -520,6 +568,8 @@ def _repair_review_feedback(worktree, item, roles, profile, review_fn,
         best_of_n=roles.best_of_n,
         dispatcher_overrides=builder_dispatchers,
         force_turn=True,
+        required_paths=item.required_paths,
+        required_paths_must_change=False,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the validated review feedback")
@@ -588,6 +638,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             best_of_n=roles.best_of_n,
             dispatcher_overrides=builder_dispatchers,
             force_turn=True,
+            required_paths=item.required_paths,
         )
         if not best.winner or not best.applied:
             raise CampaignError("no Builder candidate produced an applicable green implementation")
@@ -721,9 +772,37 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
         )
 
 
+def _select_campaign_builders(roles, profile, overrides, *, reviewer_fn, env, runner, strict):
+    """Preflight the FULL Builder pool and pick the live ones. DEFAULT: reserves substitute for
+    unavailable primaries; STRICT: any unavailable is a hard error (no substitution). The Reviewer is
+    always required (it does the adversarial review) unless a reviewer_fn is injected. Returns
+    (roles_with_live_builders, dropped_builders) — dropped is surfaced in the campaign summary."""
+    selected = dict(profile)
+    selected["panels"] = {
+        "architects": [] if reviewer_fn is not None else [roles.reviewer],
+        "builders": [x for x in roles.builders if x not in overrides],   # probe the whole pool
+    }
+    rows = readiness(selected, env=env, runner=runner)
+    live_map = {x.model: x.live for x in rows}
+    if reviewer_fn is None and not live_map.get(roles.reviewer, False):
+        raise CampaignError(f"Reviewer model unavailable: {roles.reviewer}")
+    live_builders = [b for b in roles.builders if b in overrides or live_map.get(b, False)]
+    unavailable = [b for b in roles.builders if b not in live_builders]
+    if strict and unavailable:
+        raise CampaignError(
+            f"strict: selected role model(s) unavailable; no substitution performed: {unavailable}"
+        )
+    if not live_builders:
+        raise CampaignError(
+            f"no configured Builder available for the campaign; all unavailable: {unavailable}"
+        )
+    return replace(roles, builders=tuple(live_builders)), tuple(unavailable)
+
+
 def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_of_n=None, profile=None,
                  reviewer_fn=None, builder_dispatchers=None, item_executor=None,
-                 runner=subprocess.run, env=None, trusted=False, parallel=True) -> CampaignResult:
+                 runner=subprocess.run, env=None, trusted=False, parallel=True,
+                 strict=False) -> CampaignResult:
     """Run a Plan as dependency-aware parallel PR workstreams.
 
     Users supply only the Plan and a model config:
@@ -750,27 +829,23 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
         if best_of_n is None:
             best_of_n = models.get("best_of_n", 2)
     width = 2 if best_of_n is None else int(best_of_n)
-    roles = RoleModels(tuple(builders or ()), str(reviewer or ""), width)
+    roles = RoleModels(tuple(builders or ()), str(reviewer or ""), width, strict=strict)
     profile = profile or load_profile(start=Path(repo)) or default_profile(_MODELS, _PROVIDERS)
     pool = profile.get("pool", {})
     overrides = builder_dispatchers or {}
-    missing_builders = [x for x in roles.active_builders if x not in pool and x not in overrides]
+    # check the FULL candidate pool (roles.builders), not just the first N — reserves must be
+    # configured too so they can substitute for an unavailable primary.
+    missing_builders = [x for x in roles.builders if x not in pool and x not in overrides]
     if missing_builders:
         raise CampaignError(f"Builder model(s) not configured: {missing_builders}")
     if roles.reviewer not in pool and reviewer_fn is None:
         raise CampaignError(f"Reviewer model not configured: {roles.reviewer}")
+    degraded_builders: tuple = ()
     if item_executor is None:
-        selected = dict(profile)
-        selected["panels"] = {
-            "architects": [] if reviewer_fn is not None else [roles.reviewer],
-            "builders": [x for x in roles.active_builders if x not in overrides],
-        }
-        rows = readiness(selected, env=env, runner=runner)
-        unavailable = [x.model for x in rows if not x.live]
-        if unavailable:
-            raise CampaignError(
-                f"selected role model(s) unavailable; no substitution performed: {unavailable}"
-            )
+        # DEGRADE: substitute reserves for unavailable primaries (default), or fail on any
+        # unavailable (strict). Dropped models flow to CampaignResult.degraded_builders → summary.
+        roles, degraded_builders = _select_campaign_builders(
+            roles, profile, overrides, reviewer_fn=reviewer_fn, env=env, runner=runner, strict=strict)
 
     results: dict[str, ItemResult] = {}
     pending = list(plan.items)
@@ -844,4 +919,4 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
         ran = {x.id for x in wave}
         pending = [x for x in pending if x.id not in ran]
 
-    return CampaignResult(items=results)
+    return CampaignResult(items=results, degraded_builders=degraded_builders)

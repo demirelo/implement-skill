@@ -41,6 +41,23 @@ def classify(argv) -> Verdict:
         if rx.search(cmd):
             return Verdict(safe=False, reason=reason)
     head = toks[0].rsplit("/", 1)[-1] if toks else ""
+    # Lean tools need verb-level validation. `lake` and `elan` are command multiplexers: merely
+    # allowlisting their heads would also admit dependency mutation (`lake update`) and arbitrary
+    # executables (`lake env sh`). Keep the exact compiler/build forms needed by the adapter.
+    if head == "lake":
+        if len(toks) >= 2 and toks[1] == "build":
+            return Verdict(safe=True)
+        if len(toks) >= 4 and toks[1:3] == ["env", "lean"]:
+            return Verdict(safe=True)
+        return Verdict(safe=False, reason="lake command is not an allowed build/compiler form")
+    if head in {"lean", "leanc", "leanchecker"}:
+        if len(toks) >= 2:
+            return Verdict(safe=True)
+        return Verdict(safe=False, reason=f"{head} requires an explicit input")
+    if head == "elan":
+        if toks[1:] in (["show"], ["--version"], ["version"]):
+            return Verdict(safe=True)
+        return Verdict(safe=False, reason="elan mutation is not allowed by the harness guard")
     if head in _KNOWN:
         return Verdict(safe=True)
     return Verdict(safe=False, reason=f"command not in the gate/install allowlist: {head!r}")

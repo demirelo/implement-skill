@@ -1,7 +1,8 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
-from implement import run_implement
+from implement import run_implement, _acceptance_tests
+from gate import detect_adapter
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
 
@@ -146,6 +147,48 @@ def test_run_implement_oracle_glob_ignores_worktrees(tmp_path):
         run_implement(str(repo), "x", profile=profile, runner=None, max_turns=1, trusted=True)
 
 
+def test_adapter_defined_oracles_discover_lean_tests_and_ignore_worktrees(tmp_path):
+    (tmp_path / "Tests").mkdir()
+    (tmp_path / "Tests" / "Grid.lean").write_text("#check Nat\n")
+    (tmp_path / ".worktrees" / "old" / "Tests").mkdir(parents=True)
+    (tmp_path / ".worktrees" / "old" / "Tests" / "Stale.lean").write_text("#check Nat\n")
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.31.0\n")
+    (tmp_path / "lakefile.toml").write_text("name = 'x'\n")
+    adapter = detect_adapter(tmp_path)
+    assert _acceptance_tests(tmp_path, adapter) == [str(tmp_path / "Tests" / "Grid.lean")]
+
+
+def test_run_implement_preflights_lean_before_model_spend(tmp_path, monkeypatch):
+    import implement
+    (tmp_path / "Tests").mkdir()
+    (tmp_path / "Tests" / "Grid.lean").write_text("#check Nat\n")
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.31.0\n")
+    (tmp_path / "lakefile.toml").write_text('name = "x"\n')
+    monkeypatch.setattr(implement, "preflight_lean",
+                        lambda _repo: (_ for _ in ()).throw(RuntimeError("LEAN_PREFLIGHT")))
+    profile = {"pool": {}, "panels": {"architects": [], "builders": []},
+               "credentials": {}, "prefs": {}}
+    import pytest
+    with pytest.raises(RuntimeError, match="LEAN_PREFLIGHT"):
+        run_implement(tmp_path, "x", profile=profile, trusted=True)
+
+
+def test_run_implement_refuses_python_docker_image_for_lean(tmp_path, monkeypatch):
+    import implement
+    import pytest
+    from sandbox import SandboxUnavailable
+    (tmp_path / "Tests").mkdir()
+    (tmp_path / "Tests" / "Grid.lean").write_text("#check Nat\n")
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.31.0\n")
+    (tmp_path / "lakefile.toml").write_text('name = "x"\n')
+    monkeypatch.setattr(implement, "preflight_lean", lambda _repo: None)
+    monkeypatch.setattr(implement, "available_backends", lambda: ["docker", "none"])
+    profile = {"pool": {}, "panels": {"architects": [], "builders": []},
+               "credentials": {}, "prefs": {}}
+    with pytest.raises(SandboxUnavailable, match="Python gate image"):
+        run_implement(tmp_path, "x", profile=profile, trusted=False)
+
+
 def test_run_implement_auto_packs_panel_context_and_records_run(tmp_path, monkeypatch):
     # continuity: a panel existing for the repo auto-feeds Builder prompts and records the run
     from execute import _copy_repo
@@ -248,7 +291,7 @@ def test_run_implement_explicit_models_use_exact_best_of_n_width(tmp_path, monke
     assert "c" not in best.candidates
 
 
-def test_run_implement_explicit_best_of_n_requires_enough_models(monkeypatch):
+def test_run_implement_strict_best_of_n_requires_enough_models(monkeypatch):
     import pytest
     import implement
     from execute import _copy_repo
@@ -267,5 +310,65 @@ def test_run_implement_explicit_best_of_n_requires_enough_models(monkeypatch):
             trusted=True,
             builders=["a"],
             best_of_n=2,
+            strict=True,                     # only strict mode demands exactly N available
             dispatcher_overrides={"a": lambda _p: MULTIPLY_FIX},
+        )
+
+
+def _degrade_profile(*dead):
+    # `dead` models are CONFIGURED (in the pool) but have no credential → readiness marks them not
+    # live = unavailable (distinct from an unknown/unconfigured model). Live Builders come via overrides.
+    return {"pool": {d: {"backend": "team_dispatch", "provider": d, "data": "standard"} for d in dead},
+            "panels": {"architects": [], "builders": []}, "credentials": {}, "prefs": {}}
+
+
+def test_run_implement_degrades_past_an_unavailable_builder(monkeypatch, tmp_path):
+    # DEFAULT: 3 configured, one unavailable (no dispatcher, not live), best_of_n=2 → run the 2 live
+    # ones in order, do NOT stop, and record the dropped Builder for the PR.
+    import implement
+    from execute import _copy_repo
+    monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
+    seen = []
+
+    def make(name):
+        def fn(_p):
+            seen.append(name)
+            return MULTIPLY_FIX
+        return fn
+
+    best = run_implement(
+        _copy_repo(FIXTURE), "x", profile=_degrade_profile("dead"), trusted=True,
+        builders=["a", "dead", "c"], best_of_n=2,
+        dispatcher_overrides={"a": make("a"), "c": make("c")},   # "dead" has no dispatcher → unavailable
+        ledger_path=str(tmp_path / "l.jsonl"),
+    )
+    assert best.applied is True
+    assert set(seen) == {"a", "c"} and "dead" not in best.candidates
+    assert best.unavailable == ("dead",)          # dropped, reported — never substituted silently
+
+
+def test_run_implement_degrades_to_a_single_live_builder(monkeypatch, tmp_path):
+    # DEFAULT: 2 configured, one unavailable, best_of_n=2 → carry on with the single live Builder.
+    import implement
+    from execute import _copy_repo
+    monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
+    best = run_implement(
+        _copy_repo(FIXTURE), "x", profile=_degrade_profile("dead"), trusted=True,
+        builders=["a", "dead"], best_of_n=2,
+        dispatcher_overrides={"a": lambda _p: MULTIPLY_FIX},
+        ledger_path=str(tmp_path / "l.jsonl"),
+    )
+    assert best.applied is True and set(best.candidates) == {"a"} and best.unavailable == ("dead",)
+
+
+def test_run_implement_raises_only_when_every_builder_is_unavailable(monkeypatch):
+    import pytest
+    import implement
+    from execute import _copy_repo
+    monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
+    with pytest.raises(RuntimeError, match="no configured Builder available"):
+        run_implement(
+            _copy_repo(FIXTURE), "x", profile=_degrade_profile("dead1", "dead2"), trusted=True,
+            builders=["dead1", "dead2"], best_of_n=2,
+            dispatcher_overrides={},          # none available at all
         )

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
+import gate as gate_module
 from gate import detect_adapter, run_gate
 from guard import classify
 
@@ -76,6 +77,21 @@ def test_detect_typescript_repo_selects_vitest(tmp_path):
     assert detect_adapter(repo)["name"] == "typescript-vitest"
 
 
+def test_detect_lean_repo_selects_lake(tmp_path):
+    repo = _make_repo(tmp_path, "lean-toolchain", "lakefile.toml", "lake-manifest.json")
+    assert detect_adapter(repo)["name"] == "lean-lake"
+
+
+def test_detect_mixed_lean_python_repo_prefers_stronger_lean_evidence(tmp_path):
+    repo = _make_repo(tmp_path, "pyproject.toml", "lean-toolchain", "lakefile.toml")
+    assert detect_adapter(repo)["name"] == "lean-lake"
+
+
+def test_lone_lean_toolchain_marker_does_not_override_real_adapter(tmp_path):
+    repo = _make_repo(tmp_path, "pyproject.toml", "lean-toolchain")
+    assert detect_adapter(repo)["name"] == "python-pytest"
+
+
 def test_detect_monorepo_prefers_stronger_evidence(tmp_path):
     # a TS monorepo that ALSO carries a root pyproject.toml: scored detection must pick TS
     # (3 markers) over python (1 marker) — not the old first-file-wins default of pytest.
@@ -103,3 +119,51 @@ def test_typescript_adapter_test_cmd_passes_guard():
     # command head (npx) must be on the guard allowlist or the adapter is dead on arrival.
     cfg = json.loads((ADAPTERS_DIR / "typescript_vitest.json").read_text())
     assert classify(shlex.split(cfg["test_cmd"])).safe is True
+
+
+def test_lean_lake_adapter_is_guarded_scopable_and_nonvacuous(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path, "lean-toolchain", "lakefile.toml", "Tests/Upwind.lean")
+    cfg = json.loads((ADAPTERS_DIR / "lean_lake.json").read_text())
+    assert cfg["name"] == "lean-lake" and "{path}" in cfg["test_one"]
+    assert classify(shlex.split(cfg["test_cmd"])).safe is True
+
+    class Green:
+        returncode = 0
+        stdout = "Build completed successfully.\n"
+        stderr = ""
+
+    monkeypatch.setattr(gate_module.subprocess, "run", lambda *_a, **_k: Green())
+    green = run_gate(repo, cfg)
+    assert green.passed is True
+    assert green.passing_count == 0 and green.verified_count == 1
+
+    class Red:
+        returncode = 1
+        stdout = "Tests/Upwind.lean:4:2: error: unknown identifier 'signedUpwind'\n"
+        stderr = ""
+
+    monkeypatch.setattr(gate_module.subprocess, "run", lambda *_a, **_k: Red())
+    red = run_gate(repo, cfg)
+    assert red.passed is False and red.failing_tests == ["Tests/Upwind.lean"]
+
+
+def test_full_lean_gate_builds_project_then_elaborates_each_oracle(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path, "lean-toolchain", "lakefile.toml",
+                      "Tests/First.lean", "Tests/Second.lean")
+    cfg = json.loads((ADAPTERS_DIR / "lean_lake.json").read_text())
+    calls = []
+
+    class Green:
+        returncode = 0
+        stdout = "ok\n"
+        stderr = ""
+
+    def fake(argv, **_kwargs):
+        calls.append(argv)
+        return Green()
+
+    monkeypatch.setattr(gate_module.subprocess, "run", fake)
+    result = run_gate(repo, cfg)
+    assert calls == [["lake", "build"], ["lake", "env", "lean", "Tests/First.lean"],
+                     ["lake", "env", "lean", "Tests/Second.lean"]]
+    assert result.passed is True and result.verified_count == 2

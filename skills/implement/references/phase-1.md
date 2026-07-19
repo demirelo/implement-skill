@@ -24,11 +24,14 @@ Precondition: `intent.assert_spendable(ac)` passes (Phase 0 confirmed).
 
 For each slice in `consensus.dag_order`:
 
-1. An Architect authors an acceptance test in the adapter's `test_layout` (e.g. `tests/test_<slice>.py`)
+1. An Architect authors an acceptance test in the adapter's `test_layout` (e.g.
+   `tests/test_<slice>.py` for pytest or `Tests/<Slice>.lean` for Lean)
    → `oracle.AuthoredTest(slice_id, path, body, criteria_refs)`.
 2. **Prove it RED:** `red = oracle.check_red(test, repo, adapter)` writes the test, runs the gate
    **scoped to that test only**, and requires `red.is_red and red.well_formed and red.collected > 0`
    (a test that passes immediately, or errors at collection, is not a valid oracle). Re-author on failure.
+   For Lean, parser/infrastructure failures are not valid RED evidence; the scoped module must
+   elaborate far enough to fail on the intended missing declaration or proposition.
 3. **Cross-review:** a *second* Architect verifies the test actually checks the criteria it cites →
    `oracle.CrossReview(approved, reviewer, verdict, gaps)`. `oracle.OracleValidation(test, red, review)
    .valid` is true only when RED ∧ well-formed ∧ approved. Re-author until valid.
@@ -42,6 +45,8 @@ The authored tests are the oracle — Builders must never weaken them:
   that targets a protected test path is discarded, not applied.
 
 The validated tests + DAG hand off to Phase 2 (`execute.run_best_of_n`), which drives the Builders to green.
+For Lean, the final gate runs both `lake build` and `lake env lean` over every protected acceptance
+module; this is required because `Tests/` need not be a Lake build target. See `references/lean.md`.
 
 **Secrets boundary:** test bodies + gate output sent to Architects must be scrubbed — see the boundary
 rule in `references/phase-0.md` (auto on `arch.ask`; manual `scrub.scrub(...)` before `mcp__codex__codex`).
