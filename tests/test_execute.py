@@ -80,6 +80,37 @@ def test_failure_is_fed_back_into_next_prompt():
     assert "# noop" not in (Path(work) / "mathx" / "ops.py").read_text()  # failed turn fully reverted
 
 
+def test_failed_apply_resets_tracked_and_untracked_candidate_changes(monkeypatch):
+    import execute
+    from apply_patch import ApplyResult
+
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    calls = []
+    real_apply = execute.apply_patch
+
+    def contaminated_then_real(repo, diff):
+        calls.append(1)
+        if len(calls) == 1:
+            (Path(repo) / "mathx" / "ops.py").write_text("contaminated\n")
+            (Path(repo) / "turn-leak.txt").write_text("must be removed\n")
+            return ApplyResult(False, "simulated partial apply")
+        return real_apply(repo, diff)
+
+    monkeypatch.setattr(execute, "apply_patch", contaminated_then_real)
+    result = run_inner_loop(
+        work,
+        "add multiply()",
+        adapter,
+        lambda _prompt: MULTIPLY_FIX,
+        max_turns=2,
+    )
+    assert result.success is True
+    assert len(calls) == 2
+    assert not (Path(work) / "turn-leak.txt").exists()
+    assert "contaminated" not in (Path(work) / "mathx" / "ops.py").read_text()
+
+
 def test_required_artifacts_reject_partial_green_patch_and_retry():
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
