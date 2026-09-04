@@ -14,6 +14,7 @@ from apply_patch import apply_patch
 from scrub import is_secret_file, scrub
 from lean_support import hydrate_lean_cache
 from verification import VerificationContext
+from oracle import protect_oracle, reject_if_touches_oracle
 
 # heavy/generated dirs to skip when copying a candidate workspace (H8). Only dirs that are
 # gitignored by universal convention — NOT build/dist, which a repo can legitimately track.
@@ -206,7 +207,7 @@ def _validate_verification_context(repo_path, adapter, verification_context):
 def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, secrets=None,
                    crit=None, panel_context="", repo_ctx=None,
                    force_turn=False, required_paths=(), required_paths_must_change=True,
-                   verification_context=None) -> LoopResult:
+                   verification_context=None, oracle_snapshot=None) -> LoopResult:
     verification_context = _validate_verification_context(repo_path, adapter, verification_context)
     runtime_secrets = list(verification_context.secret_values)
     secrets = runtime_secrets if secrets is None else list(secrets)
@@ -226,6 +227,8 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
     repo_ctx = _repo_context(repo_path) if repo_ctx is None else repo_ctx
     ledger: list = []      # human-readable, fed to the Builder prompt
     turns_log: list = []   # structured, fed to kill.should_stop
+    if oracle_snapshot is not None:
+        oracle_snapshot.restore()
     gate_result = verification_context.run_gate()   # turn 0: FULL suite — establishes the oracle
     if gate_result.passed:   # H5: a "green" with 0 executed tests is a false green (no oracle), not success
         if gate_result.verified_count > 0 and not force_turn:
@@ -242,26 +245,47 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
     for turn in range(1, max_turns + 1):
         diff = dispatch_fn(_build_prompt(task_brief, gate_result, ledger, repo_path, secrets,
                                          panel_context=panel_context, repo_ctx=repo_ctx))
+        if oracle_snapshot is not None and reject_if_touches_oracle(
+                diff, oracle_snapshot.files
+        ):
+            oracle_snapshot.restore()
+            ledger.append(scrub(f"turn {turn}: patch targets a protected acceptance oracle", secrets))
+            turns_log.append({"failing": list(failing), "applied": False,
+                              "denied": True, "green_delta": 0})
+            if crit is not None:
+                decision = kill.should_stop(turns_log, crit)
+                if decision.stop and decision.blocker_type != "CAP_REACHED":
+                    return LoopResult(success=False, turns=turn, ledger=list(ledger),
+                                      error=f"stop-and-ask {decision.blocker_type}: {decision.reason}")
+            continue
         applied = apply_patch(repo_path, diff)
         if not applied.ok:
             # A rejected patch may have left tracked or untracked candidate changes behind
             # (especially when the structured fallback encountered a later bad hunk). Restore
             # the candidate baseline before asking the Builder for another turn.
             _reset(repo_path)
+            if oracle_snapshot is not None:
+                oracle_snapshot.restore()
             ledger.append(scrub(f"turn {turn}: patch did not apply ({applied.error[:120]})", secrets))
             turns_log.append({"failing": list(failing), "applied": False,
                               "denied": True, "green_delta": 0})
         else:
+            if oracle_snapshot is not None:
+                oracle_snapshot.restore()
             scoped = verification_context.run_gate(only=failing) if scoped_ok else None
             if scoped is not None and not scoped.passed:   # target still red — skip the full suite
                 delta = scoped.passing_count - prev_pass
                 prev_pass = scoped.passing_count
                 _reset(repo_path)
+                if oracle_snapshot is not None:
+                    oracle_snapshot.restore()
                 ledger.append(scrub(f"turn {turn}: still failing {scoped.failing_tests}", secrets))
                 turns_log.append({"failing": list(scoped.failing_tests), "applied": True,
                                   "denied": False, "green_delta": delta})
                 gate_result = scoped
             else:   # target green (or unscoped) — FULL confirm catches regressions + enforces H5
+                if oracle_snapshot is not None:
+                    oracle_snapshot.restore()
                 full = verification_context.run_gate()
                 if full.passed and full.verified_count > 0:
                     artifact_failure = _required_paths_feedback(
@@ -270,12 +294,16 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
                     if not artifact_failure:
                         return LoopResult(success=True, turns=turn, diff=diff, ledger=list(ledger))
                     _reset(repo_path)
+                    if oracle_snapshot is not None:
+                        oracle_snapshot.restore()
                     ledger.append(scrub(f"turn {turn}: {artifact_failure}", secrets))
                     turns_log.append({"failing": list(required_paths), "applied": True,
                                       "denied": False, "green_delta": 0})
                     gate_result = full
                     continue
                 _reset(repo_path)  # fully revert the failed attempt — tracked AND untracked files
+                if oracle_snapshot is not None:
+                    oracle_snapshot.restore()
                 if scoped_ok:   # fixed the target but the full suite is red -> regression; retarget on it
                     note = f"turn {turn}: fixed target but full suite still failing {full.failing_tests}"
                     delta, prev_pass = 0, 0
@@ -316,7 +344,7 @@ def _diff_size(diff) -> int:
 def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secrets=None,
                   crit=None, panel_context=None, repo_ctx=None,
                   force_turn=False, required_paths=(), required_paths_must_change=True,
-                  verification_context=None) -> BestResult:
+                  verification_context=None, protected_oracle_paths=()) -> BestResult:
     verification_context = _validate_verification_context(repo_path, adapter, verification_context)
     runtime_secrets = list(verification_context.secret_values)
     secrets = runtime_secrets if secrets is None else list(secrets)
@@ -339,6 +367,10 @@ def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secr
                 allow_files=verification_context.allowed_runtime_files,
             )
             candidate_context = verification_context.child(work, adapter)
+            oracle_snapshot = (
+                protect_oracle(work, protected_oracle_paths)
+                if protected_oracle_paths else None
+            )
             return run_inner_loop(
                 work,
                 task_brief,
@@ -353,6 +385,7 @@ def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secr
                 required_paths=required_paths,
                 required_paths_must_change=required_paths_must_change,
                 verification_context=candidate_context,
+                oracle_snapshot=oracle_snapshot,
             )
         finally:
             if candidate_context is not None:
@@ -372,6 +405,9 @@ def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secr
         return BestResult(winner="", diff="", turns=max_turns, candidates=candidates)
     winner = min(green, key=lambda n: _diff_size(green[n].diff))
     won = green[winner]
+    if protected_oracle_paths and reject_if_touches_oracle(won.diff, protected_oracle_paths):
+        return BestResult(winner="", diff="", turns=won.turns,
+                          candidates=candidates)
     applied = apply_patch(repo_path, won.diff).ok  # materialize the RAW winner diff (scrubbing it would corrupt code)
     return BestResult(winner=winner, diff=scrub(won.diff, secrets), turns=won.turns,  # report a redacted copy
                       applied=applied, candidates=candidates)

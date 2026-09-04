@@ -29,11 +29,31 @@ def test_tier_yellow_on_escalated():
                 review=_round(escalated=[_f("untouched")])) == "yellow"
 
 
+def test_tier_distinguishes_missing_criterion_evidence_from_failure():
+    assert tier(acceptance_green=False, regate_passed=True, review=_round(),
+                acceptance_evidence={"C1": True}, acceptance_ids=("C1",)) == "green"
+    assert tier(acceptance_green=False, regate_passed=True, review=_round(),
+                acceptance_evidence={"C1": None}, acceptance_ids=("C1",)) == "yellow"
+    assert tier(acceptance_green=False, regate_passed=True, review=_round(),
+                acceptance_evidence={"C1": False}, acceptance_ids=("C1",)) == "red"
+    assert tier(acceptance_green=True, regate_passed=False, review=_round(),
+                acceptance_evidence={"C1": None}, acceptance_ids=("C1",)) == "red"
+
+
 def test_render_pr_body_has_sections_and_tier():
     body = render_pr_body(goal="add multiply", consensus_notes="one slice", acceptance_k=3,
                           acceptance_n=3, review=_round(advisory=[_f("nit")]), tier_label="green")
     assert "## Goal" in body and "add multiply" in body
     assert "3/3" in body and TIER_EMOJI["green"] in body and "GREEN" in body
+
+
+def test_render_pr_body_lists_criterion_evidence_statuses():
+    body = render_pr_body(goal="g", consensus_notes="c", acceptance_k=1, acceptance_n=2,
+                          review=_round(), tier_label="yellow",
+                          acceptance_evidence={"C1": True}, acceptance_ids=("C1", "C2"))
+    assert "## Criterion evidence" in body
+    assert "| C1 | green |" in body
+    assert "| C2 | cannot-verify |" in body
 
 
 def test_render_pr_body_tolerates_none_tier_label():

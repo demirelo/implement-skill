@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from fnmatch import fnmatch
 import json
 import re
+import shlex
 import subprocess
 import threading
 from pathlib import Path
@@ -40,6 +41,18 @@ from seed import default_profile
 from workspace import create_branch_worktree, remove_merged_worktree
 from sandbox import available_backends
 from verification import VerificationContext
+from guard import classify
+from oracle import (
+    AcceptanceCriterion,
+    AuthoredTest,
+    check_red,
+    check_command_red,
+    command_declares_oracle_path,
+    criterion_evidence,
+    normalize_criteria,
+    protect_oracle,
+    validate_criteria,
+)
 
 _HERE = Path(__file__).resolve().parent
 _MODELS = json.loads((_HERE / "models.json").read_text())
@@ -90,6 +103,9 @@ class PlanItem:
     brief: str
     deps: tuple[str, ...] = ()
     acceptance: tuple[str, ...] = ()
+    criteria: tuple[AcceptanceCriterion, ...] = ()
+    oracle_paths: tuple[str, ...] = ()
+    oracle_tests: tuple[AuthoredTest, ...] = ()
     touched_areas: tuple[str, ...] = ()
     required_paths: tuple[str, ...] = ()
     branch: str = ""
@@ -100,12 +116,31 @@ class PlanItem:
         iid = str(raw.get("id") or f"item-{index + 1}").strip()
         title = str(raw.get("title") or iid).strip()
         brief = str(raw.get("brief") or raw.get("scope") or raw.get("description") or title).strip()
+        raw_acceptance = raw.get("acceptance", raw.get("criteria", ()))
+        normalized = normalize_criteria(raw_acceptance)
+        acceptance = tuple(x.statement for x in normalized)
+        paths = list(str(x) for x in raw.get("oracle_paths", ()) or ())
+        for criterion in normalized:
+            paths.extend(criterion.oracle_paths)
+        authored = []
+        for entry in raw.get("oracle_tests", raw.get("oracles", ())) or ():
+            if not isinstance(entry, dict):
+                raise ValueError(f"oracle test must be a mapping: {entry!r}")
+            authored.append(AuthoredTest(
+                slice_id=str(entry.get("slice_id") or iid),
+                path=str(entry.get("path") or entry.get("oracle_path") or ""),
+                body=str(entry.get("body") or ""),
+                criteria_refs=tuple(str(x) for x in entry.get("criteria_refs", ())),
+            ))
         return cls(
             id=iid,
             title=title,
             brief=brief,
             deps=tuple(str(x) for x in raw.get("deps", raw.get("dependencies", ()))),
-            acceptance=tuple(str(x) for x in raw.get("acceptance", raw.get("criteria", ()))),
+            acceptance=acceptance,
+            criteria=normalized,
+            oracle_paths=tuple(dict.fromkeys(x for x in paths if x)),
+            oracle_tests=tuple(authored),
             touched_areas=tuple(str(x) for x in raw.get("touched_areas", raw.get("areas", ()))),
             required_paths=tuple(str(x) for x in raw.get("required_paths", ())),
             branch=str(raw.get("branch", "")).strip(),
@@ -302,7 +337,10 @@ def inspect_overlaps(repo, item: PlanItem, *, base="main", exclude_heads=(),
 
 
 def _task_brief(item: PlanItem, overlaps) -> str:
-    acceptance = "\n".join(f"- {x}" for x in item.acceptance) or "- Implement the item as written."
+    criteria = item.criteria or normalize_criteria(item.acceptance)
+    acceptance = "\n".join(
+        f"- {criterion.id}: {criterion.statement}" for criterion in criteria
+    ) or "- Implement the item as written."
     required = "\n".join(f"- {x}" for x in item.required_paths) or "- No required artifact paths declared."
     overlap_lines = []
     for x in overlaps:
@@ -323,6 +361,12 @@ def _task_brief(item: PlanItem, overlaps) -> str:
         f"Open-PR preflight:\n{overlap_notes}\n\n"
         "Add or update tests for every behavior change. Do not modify unrelated Plan items."
     )
+
+
+def _criterion_prompts(item: PlanItem) -> tuple[str, ...]:
+    """Keep stable criterion IDs visible to every Reviewer prompt."""
+    criteria = item.criteria or normalize_criteria(item.acceptance)
+    return tuple(f"{criterion.id}: {criterion.statement}" for criterion in criteria)
 
 
 def _changed_files(repo, base_sha, runner) -> list[str]:
@@ -368,15 +412,170 @@ def _require_verification_context(worktree, verification_context):
     return verification_context
 
 
-def _verify_local(worktree, verification_context=None):
+def _verify_local(worktree, verification_context=None, oracle_snapshot=None):
     _require_verification_context(worktree, verification_context)
     adapter = detect_adapter(worktree)
     if verification_context.adapter != adapter:
         raise CampaignError("VerificationContext does not belong to local gate adapter")
+    if oracle_snapshot is not None:
+        oracle_snapshot.restore()
     result = verification_context.run_gate()
     if not result.passed or result.verified_count <= 0:
         raise CampaignError(f"local verification failed: {result.summary}")
     return adapter, result
+
+
+def _verify_with_snapshot(worktree, verification_context, oracle_snapshot=None):
+    """Preserve the original two-argument seam for offline host/test adapters."""
+    if oracle_snapshot is None:
+        return _verify_local(worktree, verification_context)
+    return _verify_local(worktree, verification_context, oracle_snapshot)
+
+
+def _criteria_for_item(item: PlanItem, *, default_oracle_paths=()) -> tuple[AcceptanceCriterion, ...]:
+    """Resolve one item's criteria without allowing prose to masquerade as evidence."""
+    raw = item.criteria or item.acceptance
+    try:
+        criteria = validate_criteria(raw, default_oracle_paths=default_oracle_paths)
+    except ValueError as exc:
+        raise CampaignError(str(exc)) from exc
+    _validate_oracle_commands(criteria)
+    return criteria
+
+
+def _validate_oracle_commands(criteria) -> None:
+    """Apply the same allowlist to declarative criterion commands as to adapter gates."""
+    for criterion in criteria:
+        if not criterion.oracle_command:
+            continue
+        try:
+            argv = shlex.split(criterion.oracle_command)
+        except ValueError as exc:
+            raise CampaignError(
+                f"acceptance criterion {criterion.id!r} has malformed oracle command"
+            ) from exc
+        if not argv:
+            raise CampaignError(
+                f"acceptance criterion {criterion.id!r} has an empty oracle command"
+            )
+        verdict = classify(argv)
+        if not verdict.safe:
+            raise CampaignError(
+                f"acceptance criterion {criterion.id!r} oracle command denied: {verdict.reason}"
+            )
+
+
+def _protected_paths(criteria, authored=()) -> tuple[str, ...]:
+    paths = [path for criterion in criteria for path in criterion.oracle_paths]
+    paths.extend(test.path for test in authored if test.path)
+    return tuple(dict.fromkeys(str(path) for path in paths))
+
+
+def _oracle_path_key(path) -> str:
+    """Compare repository-relative oracle paths without letting ``./`` alter their identity."""
+    value = Path(str(path)).as_posix()
+    while value.startswith("./"):
+        value = value[2:]
+    return value
+
+
+def _validate_authored_oracle_relations(criteria, authored) -> None:
+    """Require each authored RED test to be declared by every criterion it references.
+
+    A ``criteria_refs`` label alone is not an executable association: an unrelated RED decoy
+    must not be able to cite a criterion whose separate oracle happens to pass.  Explicitly
+    listing the authored path in that criterion's ``oracle_paths`` also makes the path part of the
+    immutable/protected oracle set.
+    """
+    by_id = {criterion.id: criterion for criterion in criteria}
+    authored_paths: set[str] = set()
+    for authored_test in authored:
+        path = str(authored_test.path)
+        if not path:
+            raise CampaignError("acceptance oracle test has no path")
+        if not authored_test.criteria_refs:
+            raise CampaignError(
+                f"acceptance oracle {path!r} must reference a criterion"
+            )
+        path_key = _oracle_path_key(path)
+        if path_key in authored_paths:
+            raise CampaignError(f"duplicate acceptance oracle path: {path!r}")
+        authored_paths.add(path_key)
+        unknown = set(authored_test.criteria_refs) - set(by_id)
+        if unknown:
+            raise CampaignError(
+                f"acceptance oracle {path!r} references unknown criteria: {sorted(unknown)}"
+            )
+        for criterion_id in authored_test.criteria_refs:
+            declared = {_oracle_path_key(x) for x in by_id[criterion_id].oracle_paths}
+            if path_key not in declared:
+                raise CampaignError(
+                    f"acceptance oracle {path!r} is not declared by criterion {criterion_id!r}; "
+                    "add it to that criterion's oracle_paths"
+                )
+
+
+def _validate_oracle_paths(worktree, criteria, authored=()):
+    """Ensure every declared file oracle exists and is a regular, non-link file.
+
+    Authored RED tests are written by ``check_red`` immediately before this call.  Requiring the
+    resulting files here prevents a missing path from being counted merely because an unrelated
+    adapter gate happened to pass.
+    """
+    root = Path(worktree).resolve(strict=False)
+    declared = _protected_paths(criteria, authored)
+    for rel in declared:
+        path = Path(rel)
+        if path.is_absolute() or ".." in path.parts:
+            raise CampaignError(f"unsafe acceptance oracle path: {rel!r}")
+        raw_target = root / path
+        target = raw_target.resolve(strict=False)
+        if (raw_target.is_symlink() or not target.is_relative_to(root)
+                or not target.is_file()):
+            raise CampaignError(f"acceptance oracle path is not a regular file: {rel!r}")
+    return declared
+
+
+def _validate_item_criteria(item: PlanItem) -> tuple[AcceptanceCriterion, ...]:
+    """Validate IDs and executable criterion oracles at campaign intake.
+
+    Legacy strings still normalize for display and direct helper compatibility, but campaign
+    autonomy rejects them here instead of silently attaching every discovered adapter test.
+    """
+    criteria = normalize_criteria(item.criteria or item.acceptance)
+    if not criteria:
+        raise CampaignError(f"every Plan item needs observable acceptance criteria: {item.id}")
+    without_oracle = [x.id for x in criteria if not x.executable]
+    if without_oracle:
+        raise CampaignError(
+            f"acceptance criteria lack executable oracle path or command: {without_oracle}"
+        )
+    command_without_paths = [x.id for x in criteria if x.oracle_command and not x.oracle_paths]
+    if command_without_paths:
+        raise CampaignError(
+            f"acceptance criterion oracle_command requires oracle_paths: {command_without_paths}"
+        )
+    command_without_declared_target = [
+        x.id for x in criteria
+        if x.oracle_command and not command_declares_oracle_path(x.oracle_command, x.oracle_paths)
+    ]
+    if command_without_declared_target:
+        raise CampaignError(
+            "acceptance criterion oracle_command must name a declared oracle path: "
+            f"{command_without_declared_target}"
+        )
+    for criterion in criteria:
+        for rel in criterion.oracle_paths:
+            path = Path(rel)
+            if path.is_absolute() or ".." in path.parts:
+                raise CampaignError(
+                    f"unsafe acceptance criterion oracle path {rel!r}: {criterion.id}"
+                )
+    _validate_oracle_commands(criteria)
+    # Validate this association at campaign intake as well as in the default executor so test
+    # executors cannot accidentally bypass the immutable criterion boundary.
+    _validate_authored_oracle_relations(criteria, item.oracle_tests)
+    return criteria
 
 
 def _review_diff(worktree, base_sha, runner) -> str:
@@ -405,14 +604,15 @@ def _review_diff(worktree, base_sha, runner) -> str:
 
 
 def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispatchers,
-                       runner, env, trusted, base_sha, verification_context):
+                       runner, env, trusted, base_sha, verification_context,
+                       oracle_snapshot=None, protected_oracle_paths=()):
     _require_verification_context(worktree, verification_context)
     for round_no in range(1, 4):
         diff = _review_diff(worktree, base_sha, runner)
         raw = review_fn(build_final_review_prompt(
             item_title=item.title,
             item_brief=item.brief,
-            acceptance=item.acceptance,
+            acceptance=_criterion_prompts(item),
             diff=diff,
         ))
         review_round = parse_final_review(raw, roles.reviewer)
@@ -423,6 +623,8 @@ def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispat
         findings = "\n".join(
             f"- {x.severity}: {x.title} — {x.body}" for x in review_round.routed
         )
+        if oracle_snapshot is not None:
+            oracle_snapshot.restore()
         fix = run_implement(
             worktree,
             f"Fix only these final-review findings for {item.title}:\n{findings}",
@@ -437,20 +639,24 @@ def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispat
             required_paths=item.required_paths,
             required_paths_must_change=False,
             verification_context=verification_context,
+            protected_oracle_paths=protected_oracle_paths,
         )
         if not fix.winner or not fix.applied:
             raise CampaignError(f"review-fix round {round_no} produced no green candidate")
-        _verify_local(worktree, verification_context)
+        _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
     raise CampaignError("final reviewer still has blocking findings after three rounds")
 
 
 def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
-               trusted, pr, branch, verification_context):
+               trusted, pr, branch, verification_context, oracle_snapshot=None,
+               protected_oracle_paths=()):
     _require_verification_context(worktree, verification_context)
     rows = pr_checks(worktree, pr, runner=runner)
     logs = failed_check_logs(worktree, rows, runner=runner)
     if not checks_failed(rows):
         raise CampaignError("CI did not become green and exposed no actionable failed check")
+    if oracle_snapshot is not None:
+        oracle_snapshot.restore()
     fix = run_implement(
         worktree,
         (
@@ -469,10 +675,11 @@ def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
         required_paths=item.required_paths,
         required_paths_must_change=False,
         verification_context=verification_context,
+        protected_oracle_paths=protected_oracle_paths,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the CI failure locally")
-    _verify_local(worktree, verification_context)
+    _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
     post_comment(
         worktree,
         pr,
@@ -486,7 +693,8 @@ def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
 
 
 def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
-                           runner, env, trusted, pr, branch, verification_context):
+                           runner, env, trusted, pr, branch, verification_context,
+                           oracle_snapshot=None, protected_oracle_paths=()):
     _require_verification_context(worktree, verification_context)
     status = pr_status(worktree, pr, runner=runner)
     if not has_merge_conflict(status):
@@ -503,7 +711,7 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
         text=True,
     )
     if proc.returncode == 0:
-        _verify_local(worktree, verification_context)
+        _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
         post_comment(
             worktree,
             pr,
@@ -517,6 +725,8 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
         worktree,
         runner,
     )
+    if oracle_snapshot is not None:
+        oracle_snapshot.restore()
     fix = run_implement(
         worktree,
         (
@@ -536,10 +746,11 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
         required_paths=item.required_paths,
         required_paths_must_change=False,
         verification_context=verification_context,
+        protected_oracle_paths=protected_oracle_paths,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the merge conflicts")
-    _verify_local(worktree, verification_context)
+    _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
     post_comment(
         worktree,
         pr,
@@ -554,7 +765,8 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
 
 def _repair_review_feedback(worktree, item, roles, profile, review_fn,
                             builder_dispatchers, runner, env, trusted, pr,
-                            branch, base_sha, seen, verification_context):
+                            branch, base_sha, seen, verification_context,
+                            oracle_snapshot=None, protected_oracle_paths=()):
     _require_verification_context(worktree, verification_context)
     messages, seen = new_feedback_messages(
         pr_feedback(worktree, pr, runner=runner),
@@ -568,7 +780,7 @@ def _repair_review_feedback(worktree, item, roles, profile, review_fn,
             f"{item.brief}\n\nValidate these new GitHub review comments against the current "
             "diff. Route only valid, actionable issues:\n- " + "\n- ".join(messages)
         ),
-        acceptance=item.acceptance,
+        acceptance=_criterion_prompts(item),
         diff=_run(["git", "diff", "--binary", base_sha, "--"], worktree, runner),
     ))
     feedback_review = parse_final_review(raw, roles.reviewer)
@@ -577,6 +789,8 @@ def _repair_review_feedback(worktree, item, roles, profile, review_fn,
     findings = "\n".join(
         f"- {x.severity}: {x.title} — {x.body}" for x in feedback_review.routed
     )
+    if oracle_snapshot is not None:
+        oracle_snapshot.restore()
     fix = run_implement(
         worktree,
         f"Address only these validated GitHub review findings for {item.title}:\n{findings}",
@@ -591,13 +805,15 @@ def _repair_review_feedback(worktree, item, roles, profile, review_fn,
         required_paths=item.required_paths,
         required_paths_must_change=False,
         verification_context=verification_context,
+        protected_oracle_paths=protected_oracle_paths,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the validated review feedback")
-    _verify_local(worktree, verification_context)
+    _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
     final = _final_review_loop(
         worktree, item, roles, profile, review_fn, builder_dispatchers,
         runner, env, trusted, base_sha, verification_context,
+        oracle_snapshot, protected_oracle_paths,
     )
     commit_and_push(
         worktree,
@@ -658,6 +874,32 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             available_backends=available_backends,
             sandbox_image=item_adapter.get("docker_image"),
         )
+        criteria = _criteria_for_item(item)
+        authored = tuple(item.oracle_tests)
+        # New authored oracles are proved RED in the exact base worktree before any Builder gets a
+        # turn. Their paths are then captured in an immutable snapshot shared by every gate.
+        _validate_authored_oracle_relations(criteria, authored)
+        for authored_test in authored:
+            red = check_red(authored_test, worktree, item_adapter, verification_context)
+            if not red.is_red or not red.well_formed or red.collected <= 0:
+                raise CampaignError(
+                    f"acceptance oracle {authored_test.path!r} is not valid RED evidence: {red.reason}"
+                )
+        protected_paths = _validate_oracle_paths(worktree, criteria, authored)
+        oracle_snapshot = protect_oracle(worktree, protected_paths) if protected_paths else None
+        # Declarative command oracles must independently demonstrate RED on the exact base after
+        # authored paths are installed; an unrelated full-gate failure is never evidence.
+        for criterion in criteria:
+            if not criterion.oracle_command:
+                continue
+            red = check_command_red(
+                criterion, worktree, item_adapter, verification_context, oracle_snapshot
+            )
+            if not red.is_red or not red.well_formed or red.collected <= 0:
+                raise CampaignError(
+                    f"acceptance command oracle {criterion.id!r} is not valid RED evidence: "
+                    f"{red.reason}"
+                )
         brief = _task_brief(item, overlaps)
         best = run_implement(
             worktree,
@@ -672,11 +914,12 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             force_turn=True,
             required_paths=item.required_paths,
             verification_context=verification_context,
+            protected_oracle_paths=protected_paths,
         )
         if not best.winner or not best.applied:
             raise CampaignError("no Builder candidate produced an applicable green implementation")
 
-        _verify_local(worktree, verification_context)
+        _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
         changed = _changed_files(worktree, base_sha, runner)
         if item.tests_required and not _has_test_change(changed):
             raise CampaignError("Plan item changed behavior without adding or updating tests")
@@ -685,7 +928,18 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
         review_round = _final_review_loop(
             worktree, item, roles, profile, review_fn, builder_dispatchers,
             runner, env, trusted, base_sha, verification_context,
+            oracle_snapshot, protected_paths,
         )
+
+        # Re-run the complete protected gate after review fixes and derive K/N from the criteria,
+        # not from a prose count or an unrelated test total.
+        _, final_gate = _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
+        evidence = criterion_evidence(
+            criteria, final_gate, verification_context=verification_context,
+            adapter=item_adapter, oracle_snapshot=oracle_snapshot,
+        )
+        acceptance_k = sum(value is True for value in evidence.values())
+        acceptance_n = len(criteria)
 
         artifacts = RunArtifacts(
             goal=f"{plan.goal}: {item.title}",
@@ -696,8 +950,10 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
                 f"Dependencies: {list(item.deps) or 'none'}. "
                 f"Overlap preflight: {overlaps or 'none'}."
             ),
-            acceptance_k=len(item.acceptance),
-            acceptance_n=max(len(item.acceptance), 1),
+            acceptance_k=acceptance_k,
+            acceptance_n=acceptance_n,
+            acceptance_evidence=evidence,
+            acceptance_ids=tuple(criterion.id for criterion in criteria),
             review=review_round,
             regate_passed=True,
             trace=decision_trace(best),
@@ -718,10 +974,12 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
                 _repair_ci(
                     worktree, item, roles, profile, builder_dispatchers,
                     runner, env, trusted, pr, branch, verification_context,
+                    oracle_snapshot, protected_paths,
                 )
                 review_round = _final_review_loop(
                     worktree, item, roles, profile, review_fn, builder_dispatchers,
                     runner, env, trusted, base_sha, verification_context,
+                    oracle_snapshot, protected_paths,
                 )
                 artifacts.review = review_round
                 commit_and_push(
@@ -737,6 +995,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             repaired, updated_base = _repair_merge_conflict(
                 worktree, item, roles, profile, builder_dispatchers,
                 runner, env, trusted, pr, branch, verification_context,
+                oracle_snapshot, protected_paths,
             )
             if repaired:
                 base_sha = _run(["git", "rev-parse", updated_base], worktree, runner).strip()
@@ -744,6 +1003,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
                 review_round = _final_review_loop(
                     worktree, item, roles, profile, review_fn, builder_dispatchers,
                     runner, env, trusted, base_sha, verification_context,
+                    oracle_snapshot, protected_paths,
                 )
                 artifacts.review = review_round
                 status_out = _run(["git", "status", "--porcelain"], worktree, runner)
@@ -763,7 +1023,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             feedback_changed, seen_feedback, feedback_review = _repair_review_feedback(
                 worktree, item, roles, profile, review_fn, builder_dispatchers,
                 runner, env, trusted, pr, branch, base_sha, seen_feedback,
-                verification_context,
+                verification_context, oracle_snapshot, protected_paths,
             )
             if feedback_review is not None:
                 review_round = feedback_review
@@ -773,6 +1033,18 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             break
         else:
             raise CampaignError("PR repair did not stabilize after five rounds")
+
+        # Repair rounds may alter source after the first acceptance calculation. Re-run the
+        # protected gate and replace K/N with fresh criterion-linked evidence immediately before
+        # finalization; stale integers must never make a repaired PR green.
+        _, final_gate = _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
+        evidence = criterion_evidence(
+            criteria, final_gate, verification_context=verification_context,
+            adapter=item_adapter, oracle_snapshot=oracle_snapshot,
+        )
+        artifacts.acceptance_evidence = evidence
+        artifacts.acceptance_k = sum(value is True for value in evidence.values())
+        artifacts.acceptance_n = len(criteria)
 
         handoff = finalize(
             worktree,
@@ -851,7 +1123,15 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
     if not plan.items:
         raise CampaignError("Plan contains no implementation items")
     _validate_ref(plan.base, "Plan base branch")
-    without_acceptance = [x.id for x in plan.items if not x.acceptance]
+    without_acceptance = []
+    for item in plan.items:
+        try:
+            _validate_item_criteria(item)
+        except (CampaignError, ValueError):
+            if not (item.acceptance or item.criteria):
+                without_acceptance.append(item.id)
+            else:
+                raise
     if without_acceptance:
         raise CampaignError(
             f"every Plan item needs observable acceptance criteria: {without_acceptance}"

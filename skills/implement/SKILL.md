@@ -41,7 +41,8 @@ Before model spend, convert the Plan into PR-sized items with:
 
 - stable id and title;
 - self-contained scope;
-- observable acceptance criteria;
+- criterion-linked acceptance criteria, each with a stable ID and an executable `oracle_path` or
+  `oracle_command`;
 - dependencies;
 - predicted touched files/modules;
 - test expectations.
@@ -52,6 +53,41 @@ If predicted touched areas remain unknown, serialize those items conservatively.
 
 Every acceptance criterion must belong to exactly one item. Every item must be independently
 reviewable and must become exactly one PR.
+
+The compact Plan schema is:
+
+```json
+{
+  "id": "boundary",
+  "title": "Contain writes",
+  "acceptance": [
+    {"id": "VERIFY-1", "statement": "writes stay in the candidate",
+     "oracle_path": "tests/test_boundary.py"},
+    {"id": "VERIFY-2", "statement": "the command rejects an unsafe invocation",
+     "oracle_path": "tests/test_boundary.py",
+     "oracle_command": "pytest tests/test_boundary.py -q"}
+  ]
+}
+```
+
+Before Builder dispatch, newly authored oracle files are demonstrated RED and well formed against
+the exact base worktree. The validated files are snapshotted and restored before every scoped,
+full, or repair gate; Builder diffs that target them (including test weakening such as replacing an
+assertion with `assert True`) are rejected. Campaign autonomy rejects legacy prose criteria rather
+than attaching discovered adapter tests implicitly. Publication K/N is calculated from independent
+criterion-oracle runs after the final re-gate. Missing or non-vacuous evidence is `cannot-verify`,
+never green-tier auto-merge.
+
+When a criterion declares both `oracle_paths` and `oracle_command`, both are executed independently,
+with the immutable snapshot restored before each invocation. A command criterion's command text is
+immutable, and command criteria must list every repository oracle file they consume in that
+criterion's `oracle_paths` so they are protected and restored; command text alone is rejected before
+Builder dispatch and does not protect unlisted files.
+
+Before dispatch, every declared `oracle_command` is run against the exact base through the same
+verification context after authored oracle files are installed. It must produce a non-empty,
+objective RED result; passing commands and collection, infrastructure, or empty-output failures
+abort the campaign.
 
 ## Run the campaign
 
