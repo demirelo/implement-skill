@@ -54,6 +54,13 @@ If predicted touched areas remain unknown, serialize those items conservatively.
 Every acceptance criterion must belong to exactly one item. Every item must be independently
 reviewable and must become exactly one PR.
 
+The seed model IDs are installed identifiers: native Codex `luna` means `gpt-5.6-luna` at
+`xhigh`, and the OpenRouter `muse` Reviewer means `meta/muse-spark-1.3`. Host-owned Builder or
+Reviewer callbacks are preflighted before worktree/model activity and must return an envelope with
+the exact `model`, terminal `finish_reason: "stop"`, and non-empty structured `content`. Legacy
+plain callbacks remain an offline compatibility seam only; they do not provide identity-verified
+external approval.
+
 The compact Plan schema is:
 
 ```json

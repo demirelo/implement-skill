@@ -44,8 +44,11 @@ def credential_source(provider: str, method: str, input_fn, getpass_fn=None,
     if method == "keychain":
         service = f"implement-{provider}"
         secret = (getpass_fn or input_fn)(f"{provider}: paste key (hidden): ")
+        # `security -w <value>` exposes the key through the process argument list.  Let the
+        # Keychain tool read the hidden value from stdin instead; only the declaration is persisted.
         runner(["security", "add-generic-password", "-U", "-s", service, "-a",
-                os.environ.get("USER", "u"), "-w", secret], capture_output=True, text=True)
+                os.environ.get("USER", "u"), "-w"], input=secret,
+               capture_output=True, text=True)
         return {"source": "keychain", "service": service}
     raise ValueError(f"unknown method {method!r}")
 

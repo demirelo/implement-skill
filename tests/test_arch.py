@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
@@ -16,7 +17,11 @@ class FakeRun:
         self.calls.append((argv, kw.get("input")))
         class P:
             returncode = self.rc
-            stdout = self.out
+            model = argv[argv.index("--model") + 1] if "--model" in argv else ""
+            stdout = (json.dumps({
+                "type": "result", "subtype": "success", "is_error": False,
+                "modelUsage": {model: {}}, "result": self.out,
+            }) if argv and argv[0] == "claude" and self.rc == 0 else self.out)
             stderr = self.err
         return P()
 

@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
@@ -15,7 +16,11 @@ class FakeRun:
         self.calls.append((argv, kw.get("input")))
         class P:
             returncode = self.rc
-            stdout = self.out
+            model = argv[argv.index("--model") + 1] if "--model" in argv else ""
+            stdout = (json.dumps({
+                "type": "result", "subtype": "success", "is_error": False,
+                "modelUsage": {model: {}}, "result": self.out,
+            }) if argv and argv[0] == "claude" and self.rc == 0 else self.out)
             stderr = self.err
         return P()
 
@@ -74,7 +79,7 @@ def test_probe_argv_team_dispatch_is_one_token():
     from backends import probe_argv
     argv = probe_argv({"backend": "team_dispatch", "provider": "deepseek", "route": "openrouter"})
     assert "team_dispatch.py" in argv[1] and "--provider" in argv and "deepseek" in argv
-    assert argv[argv.index("--max-tokens") + 1] == "1"
+    assert argv[argv.index("--max-tokens") + 1] == "32"
 
 
 def test_probe_argv_claude_headless():

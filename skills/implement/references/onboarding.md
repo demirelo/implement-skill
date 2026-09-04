@@ -4,13 +4,17 @@ Run once; stored in `~/.config/implement/config.json` (global) and optional
 `.implement/config.json` (per-project override). Stores only non-secret config —
 pool, panels, credential SOURCE declarations, prefs. Secrets stay in 1Password / env / `.env`.
 
-`scripts/team_dispatch.py` supports direct env credentials:
+`scripts/team_dispatch.py` supports the same resolved credential sources as readiness:
 `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`/`MOONSHOT_API_KEY`, `OPENROUTER_API_KEY`, and
 `VENICE_API_KEY`. For providers marked `require_service_account`, it resolves the configured
 1Password `op://...` ref through a service-account token instead: first process env
 `OP_SERVICE_ACCOUNT_TOKEN`, then `launchctl getenv OP_SERVICE_ACCOUNT_TOKEN`, then the macOS
 Keychain service named by `service_account_keychain_service` (default: `op-service-account-token`).
-The token is passed only to the child `op read` subprocess.
+The token is passed only to the child `op read` subprocess. A parent live dispatcher passes the
+already resolved provider key via one canonical scoped child environment variable, so the direct
+CLI does not perform a second credential lookup. The native Codex Builder seed is `luna`
+(`gpt-5.6-luna`, `xhigh`) and the OpenRouter Reviewer seed is `muse`
+(`meta/muse-spark-1.3`).
 
 ## Flow (agent-driven)
 1. **Probe free models.** Claude (this session) and Codex MCP need no key — confirm availability.
@@ -19,7 +23,7 @@ The token is passed only to the child `op read` subprocess.
    app sessions: store the 1Password service-account token in Keychain service
    `op-service-account-token`, keep provider keys as `op://...` refs, and set
    `require_service_account: true`. Highlight **Venice = privacy lane** (e2ee) for confidential repos.
-3. **Validate** each with a real 1-token probe — `preflight.readiness(profile, probe=True)` runs
+3. **Validate** each with a real small terminal probe — `preflight.readiness(profile, probe=True)` runs
    `resolvers.validate(backends.probe_argv(entry))` and drops present-but-dead keys at setup, not mid-loop.
 4. **Compose the available model pool** with `panel.default_panels(available)` as a setup-time
    fallback. A campaign's explicit `builders` and `reviewer` choices override these role defaults;

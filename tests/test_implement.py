@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
@@ -13,6 +14,19 @@ MULTIPLY_FIX = (
     "--- a/mathx/ops.py\n+++ b/mathx/ops.py\n@@ -1,2 +1,6 @@\n def add(a, b):\n"
     "     return a + b\n+\n+\n+def multiply(a, b):\n+    return a * b\n"
 )
+
+
+def _fake_model_output(argv, diff):
+    if argv and argv[0] == "claude":
+        model = argv[argv.index("--model") + 1]
+        return json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "model": model,
+            "result": diff,
+        })
+    return diff
 
 
 def _spy_owned_context(monkeypatch, *, backend="none"):
@@ -211,9 +225,11 @@ def test_run_implement_drives_fixture_green_with_injected_profile(tmp_path, monk
 
     class FakeRun:
         def __call__(self, argv, **kw):
+            output = _fake_model_output(argv, MULTIPLY_FIX)
+
             class P:
                 returncode = 0
-                stdout = MULTIPLY_FIX
+                stdout = output
                 stderr = ""
             return P()
 
@@ -256,9 +272,11 @@ def test_run_implement_privacy_promotes_private_architect(tmp_path, monkeypatch)
 
     class FakeRun:
         def __call__(self, argv, **kw):
+            output = _fake_model_output(argv, MULTIPLY_FIX)
+
             class P:
                 returncode = 0
-                stdout = MULTIPLY_FIX
+                stdout = output
                 stderr = ""
             return P()
 
@@ -286,9 +304,11 @@ def test_run_implement_floor_skips_non_dispatchable_architect(tmp_path, monkeypa
 
     class FakeRun:
         def __call__(self, argv, **kw):
+            output = _fake_model_output(argv, MULTIPLY_FIX)
+
             class P:
                 returncode = 0
-                stdout = MULTIPLY_FIX
+                stdout = output
                 stderr = ""
             return P()
 
@@ -391,10 +411,11 @@ def test_run_implement_auto_packs_panel_context_and_records_run(tmp_path, monkey
     class FakeRun:
         def __call__(self, argv, **kw):
             prompts.append(kw.get("input") or "")
+            output = _fake_model_output(argv, MULTIPLY_FIX)
 
             class P:
                 returncode = 0
-                stdout = MULTIPLY_FIX
+                stdout = output
                 stderr = ""
             return P()
 
@@ -427,10 +448,11 @@ def test_run_implement_stateless_when_no_panel(tmp_path, monkeypatch):
     class FakeRun:
         def __call__(self, argv, **kw):
             prompts.append(kw.get("input") or "")
+            output = _fake_model_output(argv, MULTIPLY_FIX)
 
             class P:
                 returncode = 0
-                stdout = MULTIPLY_FIX
+                stdout = output
                 stderr = ""
             return P()
 
