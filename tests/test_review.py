@@ -6,6 +6,7 @@ from review import (Finding, Loc, dedup, severity_tag,
                     build_final_review_prompt, parse_final_review)
 from gate import GateResult, detect_adapter
 from execute import _copy_repo
+from verification import VerificationContext
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
 
@@ -13,6 +14,16 @@ FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
 def _f(lens, author, title, file="mathx/ops.py", line=2, objective=True, breaking=None):
     return Finding(lens=lens, author=author, title=title,
                    locations=(Loc(file=file, line=line),), objective=objective, breaking_test=breaking)
+
+
+def _context(repo, adapter, **kwargs):
+    return VerificationContext(repo, True, adapter, {}, available=["none"], **kwargs)
+
+
+def test_re_gate_requires_verification_context(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="VerificationContext"):
+        re_gate(tmp_path, "diff", {"name": "test-adapter"})
 
 
 def test_dedup_merges_same_location_across_lenses_order_independent():
@@ -101,25 +112,29 @@ def test_re_gate_passes_on_green_winner_diff():
     adapter = detect_adapter(work)
     winner = ("--- a/mathx/ops.py\n+++ b/mathx/ops.py\n@@ -1,2 +1,5 @@\n def add(a, b):\n"
               "     return a + b\n+\n+def multiply(a, b):\n+    return a * b\n")
-    rg = re_gate(work, winner, adapter)
+    with _context(work, adapter) as context:
+        rg = re_gate(work, winner, adapter, context)
     assert rg.passed is True and rg.executed > 0
 
 
-def test_re_gate_uses_adapter_verified_count_not_pytest_text(monkeypatch):
+def test_re_gate_uses_adapter_verified_count_not_pytest_text(monkeypatch, tmp_path):
     import review
     monkeypatch.setattr(review, "apply_patch", lambda *_a, **_k: type("A", (), {"ok": True})())
-    monkeypatch.setattr(review, "run_gate", lambda *_a, **_k:
-                        GateResult(passed=True, stdout="Build completed successfully\n",
-                                   verified_count=2))
-    rg = review.re_gate("/tmp/repo", "diff", {"name": "lean-lake"})
-    assert rg.passed is True and rg.executed == 2
+    adapter = {"name": "lean-lake"}
+    with _context(tmp_path, adapter) as context:
+        context.run_gate = lambda: GateResult(
+            passed=True, stdout="Build completed successfully\n", verified_count=2
+        )
+        rg = review.re_gate(tmp_path, "diff", adapter, context)
+        assert rg.passed is True and rg.executed == 2
 
 
 def test_re_gate_rolls_back_non_green_winner():
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
     noop = "--- a/mathx/ops.py\n+++ b/mathx/ops.py\n@@ -1,2 +1,3 @@\n def add(a, b):\n     return a + b\n+# noop\n"
-    rg = re_gate(work, noop, adapter)
+    with _context(work, adapter) as context:
+        rg = re_gate(work, noop, adapter, context)
     assert rg.passed is False
     assert "# noop" not in (Path(work) / "mathx" / "ops.py").read_text()   # rolled back
 
@@ -132,7 +147,8 @@ def test_re_gate_refuses_false_green_when_zero_executed():
     # all tests skipped -> exit 0 (gate "green") but 0 executed: H5 must refuse it
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
-    rg = re_gate(work, SKIP_ALL, adapter)
+    with _context(work, adapter) as context:
+        rg = re_gate(work, SKIP_ALL, adapter, context)
     assert rg.passed is False and rg.executed == 0
     assert "pytestmark" not in (Path(work) / "tests" / "test_ops.py").read_text()   # rolled back
 

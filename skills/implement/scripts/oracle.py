@@ -4,11 +4,11 @@ immutable oracle (H3): protect_oracle restores them before every Builder gate, a
 reject_if_touches_oracle blocks any Builder diff that edits them."""
 import re
 import shlex
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from guard import classify
+from verification import VerificationContext
 
 _HUNK_PLUS = re.compile(r"^\+\+\+ b/(.+)$", re.MULTILINE)
 _HUNK_MINUS = re.compile(r"^--- a/(.+)$", re.MULTILINE)
@@ -74,11 +74,17 @@ def _safe_target(repo, rel_path: str) -> Path:
     return target
 
 
-def check_red(test: AuthoredTest, repo, adapter, runner=None) -> RedResult:
+def check_red(test: AuthoredTest, repo, adapter, verification_context=None) -> RedResult:
     # Scope the gate to JUST the authored test — the whole suite may already be red for unrelated
     # reasons (the fixture ships a pre-existing failing test), which would mask this test's true
     # status. We prove THIS test fails on current code.
-    runner = runner or subprocess.run
+    if not isinstance(verification_context, VerificationContext):
+        raise ValueError("a VerificationContext is required for RED oracle execution")
+    repo_root = Path(repo).resolve(strict=False)
+    if verification_context.repo_root != repo_root:
+        raise ValueError("VerificationContext does not belong to the oracle repository")
+    if verification_context.adapter != adapter:
+        raise ValueError("VerificationContext does not belong to the selected gate adapter")
     target = _safe_target(repo, test.path)
     cmd = adapter.get("test_one", "pytest {path} -q --tb=no -rf").format(path=test.path)
     verdict = classify(shlex.split(cmd))
@@ -87,8 +93,11 @@ def check_red(test: AuthoredTest, repo, adapter, runner=None) -> RedResult:
                          reason=f"guard denied test_one: {verdict.reason}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(test.body)
-    proc = runner(shlex.split(cmd), cwd=str(repo), capture_output=True, text=True,
-                  timeout=adapter.get("timeout", 600))
+    proc = verification_context.run(
+        shlex.split(cmd),
+        cwd=repo,
+        timeout=adapter.get("timeout", 600),
+    )
     out = (proc.stdout or "") + (proc.stderr or "")
     if adapter.get("result_parser") == "lean":
         malformed = bool(re.search(adapter.get("malformed_pattern", r"(?!)"), out))

@@ -6,6 +6,7 @@ from oracle import (AuthoredTest, RedResult, CrossReview, OracleValidation,
                     check_red, protect_oracle, reject_if_touches_oracle)
 from gate import detect_adapter
 from execute import _copy_repo
+from verification import VerificationContext
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
 ADAPTERS_DIR = Path(__file__).parent.parent / "skills" / "implement" / "scripts" / "adapters"
@@ -22,11 +23,25 @@ GREEN_BODY = (
 )
 
 
+def _context(repo, adapter, **kwargs):
+    return VerificationContext(repo, True, adapter, {}, available=["none"], **kwargs)
+
+
+def test_check_red_requires_verification_context():
+    import pytest
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    test = AuthoredTest("s1", "tests/test_missing.py", RED_BODY, ())
+    with pytest.raises(ValueError, match="VerificationContext"):
+        check_red(test, work, adapter)
+
+
 def test_check_red_is_red_on_missing_feature():
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
     t = AuthoredTest(slice_id="s1", path="tests/test_multiply_oracle.py", body=RED_BODY, criteria_refs=("c1",))
-    red = check_red(t, work, adapter)
+    with _context(work, adapter) as context:
+        red = check_red(t, work, adapter, context)
     assert red.is_red is True and red.well_formed is True and red.collected > 0
 
 
@@ -34,7 +49,8 @@ def test_check_red_is_not_red_when_test_already_passes():
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
     t = AuthoredTest(slice_id="s1", path="tests/test_add_oracle.py", body=GREEN_BODY, criteria_refs=("c1",))
-    red = check_red(t, work, adapter)
+    with _context(work, adapter) as context:
+        red = check_red(t, work, adapter, context)
     assert red.is_red is False   # passes immediately -> not a valid RED oracle
 
 
@@ -44,8 +60,9 @@ def test_check_red_rejects_escaping_path():
     adapter = detect_adapter(work)
     for bad in ("../evil.py", "/tmp/evil_oracle.py", "tests/../../evil.py"):
         t = AuthoredTest(slice_id="s1", path=bad, body="x = 1\n", criteria_refs=())
-        with pytest.raises(ValueError):
-            check_red(t, work, adapter)
+        with _context(work, adapter) as context:
+            with pytest.raises(ValueError):
+                check_red(t, work, adapter, context)
 
 
 def test_check_red_flags_malformed_test_as_not_wellformed():
@@ -53,7 +70,8 @@ def test_check_red_flags_malformed_test_as_not_wellformed():
     adapter = detect_adapter(work)
     t = AuthoredTest(slice_id="s1", path="tests/test_broken_oracle.py",
                      body="def test_x(:\n    pass\n", criteria_refs=("c1",))   # syntax error
-    red = check_red(t, work, adapter)
+    with _context(work, adapter) as context:
+        red = check_red(t, work, adapter, context)
     assert red.is_red is False and red.well_formed is False and red.collected == 0
 
 
@@ -66,7 +84,8 @@ def test_check_red_understands_lean_elaboration_failure_and_syntax_failure(tmp_p
         stdout = "Tests/Upwind.lean:1:7: error: unknown identifier 'signedUpwind'\n"
         stderr = ""
 
-    red = check_red(test, tmp_path, adapter, runner=lambda *_a, **_k: MissingTheorem())
+    with _context(tmp_path, adapter, runner=lambda *_a, **_k: MissingTheorem()) as context:
+        red = check_red(test, tmp_path, adapter, context)
     assert red.is_red is True and red.well_formed is True and red.collected == 1
 
     class Malformed:
@@ -74,7 +93,8 @@ def test_check_red_understands_lean_elaboration_failure_and_syntax_failure(tmp_p
         stdout = "Tests/Upwind.lean:1:7: error: unexpected token ')'\n"
         stderr = ""
 
-    bad = check_red(test, tmp_path, adapter, runner=lambda *_a, **_k: Malformed())
+    with _context(tmp_path, adapter, runner=lambda *_a, **_k: Malformed()) as context:
+        bad = check_red(test, tmp_path, adapter, context)
     assert bad.is_red is False and bad.well_formed is False
 
 
@@ -82,7 +102,8 @@ def test_check_red_refuses_unguarded_lean_test_command_without_writing(tmp_path)
     adapter = json.loads((ADAPTERS_DIR / "lean_lake.json").read_text())
     adapter["test_one"] = "lake env sh {path}"
     test = AuthoredTest("r2", "Tests/Unsafe.lean", "#check Nat\n", ("r2",))
-    result = check_red(test, tmp_path, adapter, runner=lambda *_a, **_k: None)
+    with _context(tmp_path, adapter, runner=lambda *_a, **_k: None) as context:
+        result = check_red(test, tmp_path, adapter, context)
     assert result.is_red is False and result.well_formed is False
     assert "guard denied" in result.reason
     assert not (tmp_path / "Tests" / "Unsafe.lean").exists()

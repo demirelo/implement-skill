@@ -15,7 +15,7 @@ from pathlib import Path
 
 from arch import make_arch_dispatcher
 from execute import decision_trace
-from gate import detect_adapter, run_gate
+from gate import detect_adapter
 from gh import (
     ForgeError,
     checks_failed,
@@ -38,6 +38,8 @@ from publish import RunArtifacts, finalize, open_draft
 from review import build_final_review_prompt, parse_final_review
 from seed import default_profile
 from workspace import create_branch_worktree, remove_merged_worktree
+from sandbox import available_backends
+from verification import VerificationContext
 
 _HERE = Path(__file__).resolve().parent
 _MODELS = json.loads((_HERE / "models.json").read_text())
@@ -358,12 +360,23 @@ def _reviewer(profile, reviewer, override, runner):
     return make_arch_dispatcher(entry, runner=runner)
 
 
-def _verify_local(worktree):
+def _require_verification_context(worktree, verification_context):
+    if not isinstance(verification_context, VerificationContext):
+        raise CampaignError("a VerificationContext is required for candidate verification")
+    if verification_context.repo_root != Path(worktree).resolve(strict=False):
+        raise CampaignError("VerificationContext does not belong to candidate worktree")
+    return verification_context
+
+
+def _verify_local(worktree, verification_context=None):
+    _require_verification_context(worktree, verification_context)
     adapter = detect_adapter(worktree)
-    gate = run_gate(worktree, adapter)
-    if not gate.passed or gate.verified_count <= 0:
-        raise CampaignError(f"local verification failed: {gate.summary}")
-    return adapter, gate
+    if verification_context.adapter != adapter:
+        raise CampaignError("VerificationContext does not belong to local gate adapter")
+    result = verification_context.run_gate()
+    if not result.passed or result.verified_count <= 0:
+        raise CampaignError(f"local verification failed: {result.summary}")
+    return adapter, result
 
 
 def _review_diff(worktree, base_sha, runner) -> str:
@@ -392,7 +405,8 @@ def _review_diff(worktree, base_sha, runner) -> str:
 
 
 def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispatchers,
-                       runner, env, trusted, base_sha):
+                       runner, env, trusted, base_sha, verification_context):
+    _require_verification_context(worktree, verification_context)
     for round_no in range(1, 4):
         diff = _review_diff(worktree, base_sha, runner)
         raw = review_fn(build_final_review_prompt(
@@ -422,15 +436,17 @@ def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispat
             force_turn=True,
             required_paths=item.required_paths,
             required_paths_must_change=False,
+            verification_context=verification_context,
         )
         if not fix.winner or not fix.applied:
             raise CampaignError(f"review-fix round {round_no} produced no green candidate")
-        _verify_local(worktree)
+        _verify_local(worktree, verification_context)
     raise CampaignError("final reviewer still has blocking findings after three rounds")
 
 
 def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
-               trusted, pr, branch):
+               trusted, pr, branch, verification_context):
+    _require_verification_context(worktree, verification_context)
     rows = pr_checks(worktree, pr, runner=runner)
     logs = failed_check_logs(worktree, rows, runner=runner)
     if not checks_failed(rows):
@@ -452,10 +468,11 @@ def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
         force_turn=True,
         required_paths=item.required_paths,
         required_paths_must_change=False,
+        verification_context=verification_context,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the CI failure locally")
-    _verify_local(worktree)
+    _verify_local(worktree, verification_context)
     post_comment(
         worktree,
         pr,
@@ -469,7 +486,8 @@ def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
 
 
 def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
-                           runner, env, trusted, pr, branch):
+                           runner, env, trusted, pr, branch, verification_context):
+    _require_verification_context(worktree, verification_context)
     status = pr_status(worktree, pr, runner=runner)
     if not has_merge_conflict(status):
         return False, ""
@@ -485,7 +503,7 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
         text=True,
     )
     if proc.returncode == 0:
-        _verify_local(worktree)
+        _verify_local(worktree, verification_context)
         post_comment(
             worktree,
             pr,
@@ -517,10 +535,11 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
         force_turn=True,
         required_paths=item.required_paths,
         required_paths_must_change=False,
+        verification_context=verification_context,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the merge conflicts")
-    _verify_local(worktree)
+    _verify_local(worktree, verification_context)
     post_comment(
         worktree,
         pr,
@@ -535,7 +554,8 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
 
 def _repair_review_feedback(worktree, item, roles, profile, review_fn,
                             builder_dispatchers, runner, env, trusted, pr,
-                            branch, base_sha, seen):
+                            branch, base_sha, seen, verification_context):
+    _require_verification_context(worktree, verification_context)
     messages, seen = new_feedback_messages(
         pr_feedback(worktree, pr, runner=runner),
         seen,
@@ -570,13 +590,14 @@ def _repair_review_feedback(worktree, item, roles, profile, review_fn,
         force_turn=True,
         required_paths=item.required_paths,
         required_paths_must_change=False,
+        verification_context=verification_context,
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the validated review feedback")
-    _verify_local(worktree)
+    _verify_local(worktree, verification_context)
     final = _final_review_loop(
         worktree, item, roles, profile, review_fn, builder_dispatchers,
-        runner, env, trusted, base_sha,
+        runner, env, trusted, base_sha, verification_context,
     )
     commit_and_push(
         worktree,
@@ -615,6 +636,7 @@ def _base_for_item(plan, item, prior, runner, repo):
 def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_dispatchers,
                            runner, env, trusted, prior, item) -> ItemResult:
     branch, worktree = _branch(item), ""
+    verification_context = None
     try:
         base_ref, pr_base = _base_for_item(plan, item, prior, runner, repo)
         base_sha = _run(["git", "rev-parse", base_ref], repo, runner).strip()
@@ -626,6 +648,16 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             worktree = create_branch_worktree(
                 repo, item.id, branch, base=base_ref, runner=runner
             )
+        item_adapter = detect_adapter(worktree)
+        verification_context = VerificationContext(
+            worktree,
+            trusted,
+            item_adapter,
+            env or {},
+            runner=runner,
+            available_backends=available_backends,
+            sandbox_image=item_adapter.get("docker_image"),
+        )
         brief = _task_brief(item, overlaps)
         best = run_implement(
             worktree,
@@ -639,11 +671,12 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             dispatcher_overrides=builder_dispatchers,
             force_turn=True,
             required_paths=item.required_paths,
+            verification_context=verification_context,
         )
         if not best.winner or not best.applied:
             raise CampaignError("no Builder candidate produced an applicable green implementation")
 
-        _verify_local(worktree)
+        _verify_local(worktree, verification_context)
         changed = _changed_files(worktree, base_sha, runner)
         if item.tests_required and not _has_test_change(changed):
             raise CampaignError("Plan item changed behavior without adding or updating tests")
@@ -651,7 +684,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
         review_fn = _reviewer(profile, roles.reviewer, reviewer_fn, runner)
         review_round = _final_review_loop(
             worktree, item, roles, profile, review_fn, builder_dispatchers,
-            runner, env, trusted, base_sha,
+            runner, env, trusted, base_sha, verification_context,
         )
 
         artifacts = RunArtifacts(
@@ -684,11 +717,11 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             except ForgeError:
                 _repair_ci(
                     worktree, item, roles, profile, builder_dispatchers,
-                    runner, env, trusted, pr, branch,
+                    runner, env, trusted, pr, branch, verification_context,
                 )
                 review_round = _final_review_loop(
                     worktree, item, roles, profile, review_fn, builder_dispatchers,
-                    runner, env, trusted, base_sha,
+                    runner, env, trusted, base_sha, verification_context,
                 )
                 artifacts.review = review_round
                 commit_and_push(
@@ -703,14 +736,14 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
 
             repaired, updated_base = _repair_merge_conflict(
                 worktree, item, roles, profile, builder_dispatchers,
-                runner, env, trusted, pr, branch,
+                runner, env, trusted, pr, branch, verification_context,
             )
             if repaired:
                 base_sha = _run(["git", "rev-parse", updated_base], worktree, runner).strip()
                 artifacts.consensus_notes += f" Base refreshed to SHA {base_sha}."
                 review_round = _final_review_loop(
                     worktree, item, roles, profile, review_fn, builder_dispatchers,
-                    runner, env, trusted, base_sha,
+                    runner, env, trusted, base_sha, verification_context,
                 )
                 artifacts.review = review_round
                 status_out = _run(["git", "status", "--porcelain"], worktree, runner)
@@ -730,6 +763,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             feedback_changed, seen_feedback, feedback_review = _repair_review_feedback(
                 worktree, item, roles, profile, review_fn, builder_dispatchers,
                 runner, env, trusted, pr, branch, base_sha, seen_feedback,
+                verification_context,
             )
             if feedback_review is not None:
                 review_round = feedback_review
@@ -770,6 +804,9 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             worktree=worktree,
             error=f"{type(exc).__name__}: {exc}",
         )
+    finally:
+        if verification_context is not None:
+            verification_context.close()
 
 
 def _select_campaign_builders(roles, profile, overrides, *, reviewer_fn, env, runner, strict):

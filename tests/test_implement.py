@@ -1,8 +1,11 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
+import pytest
 from implement import run_implement, _acceptance_tests
 from gate import detect_adapter
+from sandbox import SandboxUnavailable
+from verification import VerificationContext
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
 
@@ -10,6 +13,187 @@ MULTIPLY_FIX = (
     "--- a/mathx/ops.py\n+++ b/mathx/ops.py\n@@ -1,2 +1,6 @@\n def add(a, b):\n"
     "     return a + b\n+\n+\n+def multiply(a, b):\n+    return a * b\n"
 )
+
+
+def _spy_owned_context(monkeypatch, *, backend="none"):
+    import implement
+    seen = {}
+
+    class SpyContext:
+        def __init__(self, repo_root, _trusted, adapter, _env, **_kwargs):
+            self.repo_root = Path(repo_root).resolve()
+            self.adapter = adapter
+            self.backend = backend
+            self.allowed_runtime_files = ()
+            self.secret_values = ()
+            self.closed = False
+            seen["context"] = self
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(implement, "VerificationContext", SpyContext)
+    return seen
+
+
+def test_run_implement_reuses_injected_verification_context(tmp_path, monkeypatch):
+    import implement
+    from execute import BestResult, LoopResult, _copy_repo
+
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    context = VerificationContext(work, True, adapter, {}, available=["none"])
+    close_calls = []
+    real_close = context.close
+    context.close = lambda: close_calls.append(True)
+    profile = {
+        "pool": {},
+        "panels": {"architects": [], "builders": []},
+        "credentials": {},
+        "prefs": {},
+    }
+    seen = {}
+
+    def fail_if_reselected(*_args, **_kwargs):
+        raise AssertionError("injected context must not reselect a backend")
+
+    def fake_best(*_args, **kwargs):
+        seen["context"] = kwargs["verification_context"]
+        return BestResult(
+            winner="x",
+            diff="",
+            turns=0,
+            candidates={"x": LoopResult(success=False, turns=0)},
+        )
+
+    monkeypatch.setattr(implement, "available_backends", fail_if_reselected)
+    monkeypatch.setattr(implement, "run_best_of_n", fake_best)
+    try:
+        result = run_implement(
+            work,
+            "x",
+            profile=profile,
+            trusted=True,
+            builders=["x"],
+            dispatcher_overrides={"x": lambda _prompt: ""},
+            verification_context=context,
+            ledger_path=str(tmp_path / "outcomes.jsonl"),
+        )
+    finally:
+        context.close = real_close
+        real_close()
+    assert result.winner == "x"
+    assert seen["context"] is context
+    assert close_calls == []
+
+
+def test_run_implement_does_not_close_injected_context_on_failure(monkeypatch):
+    import implement
+    from execute import _copy_repo
+
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    context = VerificationContext(work, True, adapter, {}, available=["none"])
+    close_calls = []
+    real_close = context.close
+    context.close = lambda: close_calls.append(True)
+    profile = {
+        "pool": {},
+        "panels": {"architects": [], "builders": []},
+        "credentials": {},
+        "prefs": {},
+    }
+
+    def continuity_failure(*_args, **_kwargs):
+        raise RuntimeError("CONTINUITY_FAILURE")
+
+    monkeypatch.setattr(implement.continuity, "exists", continuity_failure)
+    try:
+        with pytest.raises(RuntimeError, match="CONTINUITY_FAILURE"):
+            run_implement(
+                work,
+                "x",
+                profile=profile,
+                trusted=True,
+                builders=["x"],
+                dispatcher_overrides={"x": lambda _prompt: ""},
+                verification_context=context,
+            )
+    finally:
+        context.close = real_close
+        real_close()
+    assert close_calls == []
+
+
+def test_run_implement_closes_owned_context_when_continuity_fails(monkeypatch):
+    import implement
+    from execute import _copy_repo
+
+    seen = _spy_owned_context(monkeypatch)
+    work = _copy_repo(FIXTURE)
+    profile = {
+        "pool": {},
+        "panels": {"architects": [], "builders": []},
+        "credentials": {},
+        "prefs": {},
+    }
+
+    def continuity_failure(*_args, **_kwargs):
+        raise RuntimeError("CONTINUITY_FAILURE")
+
+    monkeypatch.setattr(implement.continuity, "exists", continuity_failure)
+    with pytest.raises(RuntimeError, match="CONTINUITY_FAILURE"):
+        run_implement(
+            work,
+            "x",
+            profile=profile,
+            trusted=True,
+            builders=["x"],
+            dispatcher_overrides={"x": lambda _prompt: ""},
+        )
+    assert seen["context"].closed is True
+
+
+def test_run_implement_closes_owned_context_when_no_dispatcher(monkeypatch):
+    from execute import _copy_repo
+
+    seen = _spy_owned_context(monkeypatch)
+    profile = {
+        "pool": {},
+        "panels": {"architects": [], "builders": []},
+        "credentials": {},
+        "prefs": {},
+    }
+    with pytest.raises(RuntimeError, match="no live Builder"):
+        run_implement(_copy_repo(FIXTURE), "x", profile=profile, trusted=True, runner=None)
+    assert seen["context"].closed is True
+
+
+def test_run_implement_closes_owned_context_on_lean_gate_image_rejection(monkeypatch, tmp_path):
+    import implement
+
+    (tmp_path / "Tests").mkdir()
+    (tmp_path / "Tests" / "Grid.lean").write_text("#check Nat\n")
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.31.0\n")
+    (tmp_path / "lakefile.toml").write_text('name = "x"\n')
+    monkeypatch.setattr(implement, "preflight_lean", lambda _repo: None)
+    seen = _spy_owned_context(monkeypatch, backend="docker")
+    profile = {
+        "pool": {},
+        "panels": {"architects": [], "builders": []},
+        "credentials": {},
+        "prefs": {},
+    }
+    with pytest.raises(SandboxUnavailable, match="Python gate image"):
+        run_implement(
+            tmp_path,
+            "x",
+            profile=profile,
+            trusted=False,
+            builders=["x"],
+            dispatcher_overrides={"x": lambda _prompt: ""},
+        )
+    assert seen["context"].closed is True
 
 
 def test_run_implement_drives_fixture_green_with_injected_profile(tmp_path, monkeypatch):
@@ -61,6 +245,7 @@ def test_run_implement_privacy_promotes_private_architect(tmp_path, monkeypatch)
     import implement
     monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
     work = _copy_repo(FIXTURE)
+    gate_context = VerificationContext(work, True, detect_adapter(work), {}, available=["none"])
     profile = {
         "pool": {"glm": {"backend": "team_dispatch", "provider": "glm", "route": "direct",
                          "cred_provider": "venice", "data": "private"}},
@@ -79,7 +264,7 @@ def test_run_implement_privacy_promotes_private_architect(tmp_path, monkeypatch)
 
     best = run_implement(work, "add multiply()", profile=profile, privacy=True,
                          runner=FakeRun(), env={"VEN": "sk-live"}, max_turns=2, trusted=True,
-                         ledger_path=str(tmp_path / "led.jsonl"))
+                         ledger_path=str(tmp_path / "led.jsonl"), verification_context=gate_context)
     assert best.applied is True
 
 
@@ -90,6 +275,7 @@ def test_run_implement_floor_skips_non_dispatchable_architect(tmp_path, monkeypa
     import implement
     monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
     work = _copy_repo(FIXTURE)
+    gate_context = VerificationContext(work, True, detect_adapter(work), {}, available=["none"])
     profile = {
         "pool": {"gpt": {"backend": "codex_mcp", "model": "gpt-5.6-sol", "data": "standard"},
                  "claude": {"backend": "claude_headless", "model": "claude-opus-4-8", "data": "standard"}},
@@ -107,7 +293,8 @@ def test_run_implement_floor_skips_non_dispatchable_architect(tmp_path, monkeypa
             return P()
 
     best = run_implement(work, "add multiply()", profile=profile, runner=FakeRun(), max_turns=2,
-                         trusted=True, ledger_path=str(tmp_path / "led.jsonl"))
+                         trusted=True, ledger_path=str(tmp_path / "led.jsonl"),
+                         verification_context=gate_context)
     assert best.applied is True
 
 
@@ -196,6 +383,7 @@ def test_run_implement_auto_packs_panel_context_and_records_run(tmp_path, monkey
     import continuity
     monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
     work = _copy_repo(FIXTURE)
+    gate_context = VerificationContext(work, True, detect_adapter(work), {}, available=["none"])
     home = str(tmp_path)
     continuity.record(work, {"type": "invariant", "text": "PANEL_MARKER_XYZ"}, home=home)
     prompts = []
@@ -217,7 +405,8 @@ def test_run_implement_auto_packs_panel_context_and_records_run(tmp_path, monkey
         "prefs": {},
     }
     best = run_implement(work, "add multiply()", profile=profile, runner=FakeRun(), max_turns=2,
-                         trusted=True, ledger_path=str(tmp_path / "led.jsonl"), home=home)
+                         trusted=True, ledger_path=str(tmp_path / "led.jsonl"), home=home,
+                         verification_context=gate_context)
     assert best.applied is True
     assert any("PANEL_MARKER_XYZ" in p for p in prompts)          # packed context reached the Builder
     evs = continuity.load_events(work, home=home)
@@ -231,6 +420,7 @@ def test_run_implement_stateless_when_no_panel(tmp_path, monkeypatch):
     import continuity
     monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
     work = _copy_repo(FIXTURE)
+    gate_context = VerificationContext(work, True, detect_adapter(work), {}, available=["none"])
     home = str(tmp_path)
     prompts = []
 
@@ -251,7 +441,8 @@ def test_run_implement_stateless_when_no_panel(tmp_path, monkeypatch):
         "prefs": {},
     }
     best = run_implement(work, "add multiply()", profile=profile, runner=FakeRun(), max_turns=2,
-                         trusted=True, ledger_path=str(tmp_path / "led.jsonl"), home=home)
+                         trusted=True, ledger_path=str(tmp_path / "led.jsonl"), home=home,
+                         verification_context=gate_context)
     assert best.applied is True
     assert all("Standing panel context" not in p for p in prompts)
     assert continuity.exists(work, home=home) is False            # no state spawned uninvited

@@ -11,10 +11,11 @@ from backends import make_dispatcher, PrivacyViolation, UnsupportedBackend
 from profile import load_profile
 from seed import default_profile
 from suitability import assess as assess_suitability
-from sandbox import choose_backend, available_backends, wrap as sandbox_wrap
+from sandbox import available_backends
 from kill import KillCriteria
 from lean_support import is_lean_adapter, preflight_lean
 from sandbox import SandboxUnavailable
+from verification import VerificationContext
 import continuity
 import features
 import outcomes
@@ -47,7 +48,8 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
                   privacy=False, runner=subprocess.run, env=None, max_turns=6, trusted=False,
                   ledger_path=None, builders=None, dispatcher_overrides=None,
                   force_turn=False, repo_ctx=None, best_of_n=None,
-                  required_paths=(), required_paths_must_change=True, strict=False):
+                  required_paths=(), required_paths_must_change=True, strict=False,
+                  verification_context=None, verification_runner=subprocess.run):
     if profile is None:
         profile = load_profile(start=start, home=home) or default_profile(_MODELS, _PROVIDERS)
     dispatcher_overrides = dispatcher_overrides or {}
@@ -75,19 +77,6 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     suit = assess_suitability(adapter=adapter, acceptance_tests=acceptance_tests)
     if not suit.autonomous_ok:
         raise RuntimeError("refusing autonomous run (no objective oracle): " + "; ".join(suit.reasons))
-    # H6 — pick a sandbox backend (raises SandboxUnavailable if untrusted + no backend); wrap the gate
-    backend = choose_backend(trusted=trusted, available=available_backends())
-    docker_image = adapter.get("docker_image")
-    if is_lean_adapter(adapter) and backend == "docker" and not docker_image:
-        raise SandboxUnavailable(
-            "Lean/Lake gate selected Docker, but the adapter has no explicitly pinned "
-            "docker_image; refusing to fall back to the Python gate image"
-        )
-
-    def _wrap(argv, workdir):
-        kwargs = {"image": docker_image} if docker_image else {}
-        return sandbox_wrap(argv, backend=backend, workdir=workdir, **kwargs)
-
     live = {r.model: r.live for r in readiness(profile, env=env, runner=runner)}
     pool, panels = profile.get("pool", {}), profile.get("panels", {})
     prefs = profile.get("prefs", {})
@@ -141,28 +130,68 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
             dispatchers[model] = dispatcher_overrides[model]
         else:
             dispatchers[model] = _dispatcher(model)
-    if not dispatchers and builders is None:  # default floor only; explicit roles never substitute
-        for m in panels.get("architects", []):
-            if live.get(m):
-                try:
-                    dispatchers[m] = _dispatcher(m)
-                except (PrivacyViolation, UnsupportedBackend):  # skip non-dispatchable/standard architects
-                    continue
-    if not dispatchers:
-        raise RuntimeError("no live Builder in the panel — run the implement setup wizard")
-    # panel continuity: when a panel exists for this repo, each Builder gets its packed slice
-    # (brief + invariants + ITS OWN ledger) and the run outcome is recorded back — Builders feel
-    # stateful across related work. No panel -> byte-identical stateless prompts, nothing spawned.
-    panel_ctx = None
-    if continuity.exists(repo_path, home=home):
-        panel_ctx = {m: continuity.pack(repo_path, m, home=home) for m in dispatchers}
-    best = run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=max_turns,
-                         wrap=_wrap, crit=KillCriteria(max_turns=max_turns),
-                         panel_context=panel_ctx, repo_ctx=repo_ctx,
-                         force_turn=force_turn, required_paths=required_paths,
-                         required_paths_must_change=required_paths_must_change)
-    best.unavailable = tuple(unavailable_builders)   # dropped-at-preflight Builders → surfaced in the PR
-    outcomes.log_run(best, bucket, list(dispatchers), path=ledger_path)   # learn from this run
-    if panel_ctx is not None:
-        continuity.record_run(repo_path, best, bucket, list(dispatchers), home=home)
-    return best
+
+    owns_verification_context = verification_context is None
+    if verification_context is None:
+        # The context owns backend selection and all child execution. Passing the provider as a
+        # callable keeps backend discovery injectable for deterministic tests and adapters.
+        verification_context = VerificationContext(
+            repo_path, trusted, adapter, env or {}, runner=verification_runner,
+            available_backends=available_backends,
+            sandbox_image=adapter.get("docker_image"),
+        )
+    elif not isinstance(verification_context, VerificationContext):
+        raise ValueError("verification_context must be a VerificationContext")
+    else:
+        context_root = Path(repo_path).resolve(strict=False)
+        if verification_context.repo_root != context_root:
+            raise ValueError("verification_context does not belong to repo_path")
+        if verification_context.adapter != adapter:
+            raise ValueError("verification_context does not belong to the selected gate adapter")
+
+    try:
+        backend = verification_context.backend
+        docker_image = adapter.get("docker_image")
+        if is_lean_adapter(adapter) and backend == "docker" and not docker_image:
+            raise SandboxUnavailable(
+                "Lean/Lake gate selected Docker, but the adapter has no explicitly pinned "
+                "docker_image; refusing to fall back to the Python gate image"
+            )
+
+        if not dispatchers and builders is None:  # default floor only; explicit roles never substitute
+            for m in panels.get("architects", []):
+                if live.get(m):
+                    try:
+                        dispatchers[m] = _dispatcher(m)
+                    except (PrivacyViolation, UnsupportedBackend):  # skip non-dispatchable/standard architects
+                        continue
+        if not dispatchers:
+            raise RuntimeError("no live Builder in the panel — run the implement setup wizard")
+        # panel continuity: when a panel exists for this repo, each Builder gets its packed slice
+        # (brief + invariants + ITS OWN ledger) and the run outcome is recorded back — Builders feel
+        # stateful across related work. No panel -> byte-identical stateless prompts, nothing spawned.
+        panel_ctx = None
+        if continuity.exists(repo_path, home=home):
+            panel_ctx = {m: continuity.pack(repo_path, m, home=home) for m in dispatchers}
+        best = run_best_of_n(
+            repo_path,
+            task_brief,
+            adapter,
+            dispatchers,
+            max_turns=max_turns,
+            crit=KillCriteria(max_turns=max_turns),
+            panel_context=panel_ctx,
+            repo_ctx=repo_ctx,
+            force_turn=force_turn,
+            required_paths=required_paths,
+            required_paths_must_change=required_paths_must_change,
+            verification_context=verification_context,
+        )
+        best.unavailable = tuple(unavailable_builders)   # dropped-at-preflight Builders → surfaced in the PR
+        outcomes.log_run(best, bucket, list(dispatchers), path=ledger_path)   # learn from this run
+        if panel_ctx is not None:
+            continuity.record_run(repo_path, best, bucket, list(dispatchers), home=home)
+        return best
+    finally:
+        if owns_verification_context:
+            verification_context.close()

@@ -114,7 +114,9 @@ def _failing_tests(out: str, adapter) -> list[str]:
     ]
 
 
-def run_gate(repo_path, adapter, wrap=None, only=None) -> GateResult:
+def run_gate(repo_path, adapter, wrap=None, only=None, *, env=None,
+              runner=None) -> GateResult:
+    runner = subprocess.run if runner is None else runner
     timeout = adapter.get("timeout", 600)  # seconds; a hung suite must not stall the loop
     # `only` runs just those failing tests (two-tier gate's scoped pass); full suite otherwise.
     repo = Path(repo_path)
@@ -138,8 +140,15 @@ def run_gate(repo_path, adapter, wrap=None, only=None) -> GateResult:
             continue
         argv = wrap(command, str(repo_path)) if wrap else command
         try:
-            proc = subprocess.run(argv, cwd=str(repo_path), capture_output=True, text=True,
-                                  timeout=timeout)
+            options = {
+                "cwd": str(repo_path),
+                "capture_output": True,
+                "text": True,
+                "timeout": timeout,
+            }
+            if env is not None:
+                options["env"] = env
+            proc = runner(argv, **options)
         except subprocess.TimeoutExpired as exc:
             # .output/.stderr are typed str|bytes|None; text=True yields str at runtime, but the
             # bytes branch is kept to satisfy the type-checker and stay robust either way.
