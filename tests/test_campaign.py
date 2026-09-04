@@ -195,7 +195,7 @@ def _green_artifacts(**overrides):
 def test_campaign_forge_merge_request_stays_queued_until_state_confirmed():
     fake = _StatefulForge(merged=False)
     result = finalize("/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"),
-                      _green_artifacts(), runner=fake)
+                      _green_artifacts(), idempotency_key="test-finalize", runner=fake)
     assert result.state == "queued" and not result.merged
     assert any(command[:3] == ["gh", "pr", "merge"] for command in fake.calls)
 
@@ -204,7 +204,8 @@ def test_stacked_child_cannot_request_merge_before_parent_reconciliation():
     fake = _StatefulForge(merged=True)
     result = finalize(
         "/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"),
-        _green_artifacts(stacked_on="implement/parent"), runner=fake,
+        _green_artifacts(stacked_on="implement/parent"), idempotency_key="test-finalize",
+        runner=fake,
     )
     assert result.state == "blocked" and not result.merged
     assert not any(command[:3] == ["gh", "pr", "merge"] for command in fake.calls)
@@ -236,7 +237,7 @@ def test_campaign_finalization_blocks_bodyless_changes_requested_and_inline_thre
     fake = _StatefulForge()
     result = finalize(
         "/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"), _green_artifacts(),
-        runner=fake,
+        idempotency_key="test-finalize", runner=fake,
         forge_feedback={
             "reviewDecision": "CHANGES_REQUESTED",
             "reviews": [{"state": "CHANGES_REQUESTED", "body": ""}],

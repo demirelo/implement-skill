@@ -36,25 +36,28 @@ class FakeRun:
 
 def test_open_draft_pr_builds_argv_and_parses_url():
     fake = FakeRun(out="https://github.com/o/r/pull/42\n")
-    ref = open_draft_pr("/repo", branch="feat/x", base="main", title="T", body="BODY", runner=fake)
+    ref = open_draft_pr("/repo", branch="feat/x", base="main", title="T", body="BODY",
+                        idempotency_key="test-open", inventory=[], runner=fake)
     assert ref == PrRef(number=42, url="https://github.com/o/r/pull/42", branch="feat/x")
     argv, stdin = fake.calls[0]
     assert argv[:3] == ["gh", "pr", "create"] and "--draft" in argv
     # option VALUES use = form so a leading-dash branch/title can't be parsed as a flag
     assert "--head=feat/x" in argv and "--base=main" in argv and "--title=T" in argv
-    assert "--body-file=-" in argv and stdin == "BODY"
+    assert "--body-file=-" in argv and stdin.endswith("BODY")
 
 
 def test_open_draft_pr_equals_form_keeps_leading_dash_title_safe():
     fake = FakeRun(out="https://github.com/o/r/pull/1\n")
-    open_draft_pr("/repo", branch="feat/x", base="main", title="-rm -rf", body="b", runner=fake)
+    open_draft_pr("/repo", branch="feat/x", base="main", title="-rm -rf", body="b",
+                  idempotency_key="test-open", inventory=[], runner=fake)
     assert "--title=-rm -rf" in fake.calls[0][0]   # the dash title is a value, never a flag
 
 
 def test_open_draft_pr_parses_url_from_full_output_and_strips_query():
     # the URL is not always the last line, and may carry a query string
     fake = FakeRun(out="https://github.com/o/r/pull/42?expand=1\nWarning: something\n")
-    ref = open_draft_pr("/repo", branch="b", base="main", title="t", body="x", runner=fake)
+    ref = open_draft_pr("/repo", branch="b", base="main", title="t", body="x",
+                        idempotency_key="test-open", inventory=[], runner=fake)
     assert ref.number == 42 and ref.url == "https://github.com/o/r/pull/42"
 
 
@@ -66,6 +69,7 @@ def test_commit_and_push_rejects_leading_dash_branch():
 def test_open_draft_pr_rejects_option_injection_branch():
     with pytest.raises(ForgeError):
         open_draft_pr("/repo", branch="--upload-pack=evil", base="main", title="t", body="x",
+                      idempotency_key="test-open", inventory=[],
                       runner=FakeRun(out="https://github.com/o/r/pull/1\n"))
 
 
@@ -76,7 +80,8 @@ def test_pr_op_rejects_leading_dash_pr():
 
 def test_open_draft_pr_raises_when_no_url():
     with pytest.raises(ForgeError):
-        open_draft_pr("/repo", branch="b", base="main", title="t", body="x", runner=FakeRun(out="oops"))
+        open_draft_pr("/repo", branch="b", base="main", title="t", body="x",
+                      idempotency_key="test-open", inventory=[], runner=FakeRun(out="oops"))
 
 
 def test_commit_and_push_sequence_and_sign_flag():
@@ -117,11 +122,11 @@ def test_commit_and_push_existing_branch_verifies_current_branch():
 def test_post_comment_and_ready_and_body_use_pr_ref():
     fake = FakeRun(out="")
     ref = PrRef(number=7, url="https://github.com/o/r/pull/7", branch="b")
-    post_comment("/repo", ref, "hello", runner=fake)
+    post_comment("/repo", ref, "hello", idempotency_key="test-comment", comments=[], runner=fake)
     mark_ready("/repo", ref, runner=fake)
     update_body("/repo", ref, "newbody", runner=fake)
     assert fake.calls[0][0][:3] == ["gh", "pr", "comment"] and fake.calls[0][0][3] == ref.url
-    assert fake.calls[0][1] == "hello"
+    assert fake.calls[0][1].endswith("hello") and "implement-idempotency-key:test-comment" in fake.calls[0][1]
     assert fake.calls[1][0] == ["gh", "pr", "ready", ref.url]
     assert fake.calls[2][0][:3] == ["gh", "pr", "edit"] and fake.calls[2][1] == "newbody"
 

@@ -16,13 +16,14 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
 from scrub import scrub, env_secrets
 
 EVENT_TYPES = {"decision", "rejected", "invariant", "review", "provider_note",
-               "delta", "run", "pr"}
+               "delta", "run", "pr", "external_action", "reconciliation"}
 
 # Stable roles (references/panel-continuity.md §Stable Roles) so feedback compounds per model.
 ROLES = {
@@ -67,10 +68,109 @@ def canonical_state_exists(repo_path, home=None) -> bool:
     return canonical_state_path(repo_path, home).is_file()
 
 
-def worker_projection(repo_path, item_id, *, home=None) -> dict:
+def worker_projection(repo_path, item_id, *, home=None, budget=None) -> dict:
     """Read a bounded canonical projection; never packs events or provider ledgers."""
     from campaign_state import project_worker_context
-    return project_worker_context(canonical_state_path(repo_path, home), item_id)
+    return project_worker_context(canonical_state_path(repo_path, home), item_id, budget=budget)
+
+
+def scout_history(repo_path, *, item_id=None, home=None, budget=6000) -> str:
+    """Return historical rationale only for an explicit on-demand scout.
+
+    Normal Builder projections never call this function.  It is intentionally a bounded, scrubbed
+    text view of the append-only audit log, not an instruction stream and not canonical state.
+    """
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 256:
+        raise ContinuityError("scout history budget must be an integer >= 256")
+    rows = []
+    for event in load_events(repo_path, home):
+        if item_id is not None and isinstance(event, dict) and event.get("item_id") not in {
+                None, item_id,
+        }:
+            continue
+        rows.append(_ledger_line(event))
+    return scrub("\n".join(rows)[-budget:], env_secrets())
+
+
+historical_context = scout_history
+
+
+def scout_proposal(repo_path, item_id, changes, *, expected_revision=None, rationale="", home=None):
+    """Validate a historical scout's proposal without mutating state.
+
+    The returned envelope must be explicitly committed by the manager through the regular revision
+    and authorization path.  This separation prevents old traces from becoming hidden Builder
+    instructions or directly overwriting canonical state.
+    """
+    from campaign_state import load_state, validate_scout_proposal
+    state = load_state(canonical_state_path(repo_path, home))
+    secrets = env_secrets()
+    proposal = {
+        "item_id": item_id,
+        "changes": _scrub_strings(changes, secrets),
+        "rationale": scrub(str(rationale or ""), secrets),
+    }
+    if expected_revision is not None:
+        proposal["expected_revision"] = expected_revision
+    return validate_scout_proposal(state, proposal, item_id=item_id)
+
+
+propose_state = scout_proposal
+
+
+def history_scout(repo_path, item_id, *, changes=None, rationale="", home=None,
+                  budget=6000, runner=subprocess.run) -> dict:
+    """Read historical evidence and return a proposal bound to the current state revision.
+
+    This is an explicit opt-in escape hatch. It never writes state, never turns old text into a
+    Builder prompt automatically, and never applies the returned proposal. A Manager may pass the
+    proposal's ``changes`` through ``campaign_state.validate_scout_proposal`` and then use the
+    ordinary optimistic patch/authorization path.
+    """
+    from campaign_state import _active_plan_digest, load_state
+
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 256:
+        raise ContinuityError("history scout budget must be an integer >= 256")
+    state = load_state(canonical_state_path(repo_path, home))
+    if item_id not in state["item_states"]:
+        raise ContinuityError(f"unknown history-scout item: {item_id!r}")
+    try:
+        proc = runner(
+            ["git", "log", "--format=%h %s", "-20", "--", str(item_id)],
+            cwd=str(repo_path), capture_output=True, text=True,
+        )
+        git_history = (proc.stdout or "") if proc.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        git_history = ""
+    secrets = env_secrets()
+    # Both git output and manager-supplied rationale/changes are optional historical content. They
+    # cross the structured proposal boundary and must receive the same outbound scrub as the panel
+    # history, including nested values in the proposed state patch.
+    git_history = scrub(git_history, secrets)
+    history = scout_history(repo_path, item_id=item_id, home=home, budget=budget)
+    available = max(budget - len(git_history) - 64, 0)
+    if len(history) > available:
+        history = history[-available:] if available else ""
+    proposal = {
+        "type": "scout_proposal",
+        "item_id": item_id,
+        "expected_revision": state["revision"],
+        "source_revision": state["revision"],
+        "source_plan_digest": _active_plan_digest(state),
+        "changes": _scrub_strings(dict(changes or {}), secrets),
+        "rationale": scrub(str(rationale or ""), secrets),
+    }
+    return {
+        **proposal,
+        "history": history,
+        "git_history": git_history,
+        "bound_revision": state["revision"],
+    }
+
+
+# Friendly aliases used by host integrations. They all retain explicit opt-in semantics.
+scout = history_scout
+historical_scout = history_scout
 
 
 def _scrub_strings(obj, secrets):
@@ -135,12 +235,20 @@ def read_brief(repo_path, home=None) -> str:
     return p.read_text() if p.exists() else ""
 
 
-def pack(repo_path, model, *, delta="", home=None, budget=6000, secrets=None) -> str:
+def pack(repo_path, model, *, delta="", home=None, budget=6000, secrets=None,
+         scout=False, include_history=None) -> str:
     """Deterministic, char-budgeted prompt slice for ONE model: role reminder + pinned
     invariants + delta are mandatory; the brief head and this model's ledger tail fill the
     remaining budget (oldest ledger entries drop first). "" when no panel exists — the
     stateless default is preserved byte-for-byte."""
     if not exists(repo_path, home):
+        return ""
+    # Once a canonical campaign exists, normal prompt packing is intentionally history-free.  Keep
+    # the legacy panel behavior for standalone pre-Item-7 users; explicit scout=True is the only
+    # way to recover old rationale from a canonical campaign.
+    if include_history is None:
+        include_history = bool(scout) or not canonical_state_exists(repo_path, home)
+    if not include_history:
         return ""
     d = panel_dir(repo_path, home)
     role = ROLES.get(model, "Builder")

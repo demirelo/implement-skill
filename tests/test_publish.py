@@ -1,8 +1,10 @@
 import sys
 from pathlib import Path
+import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
 from publish import open_draft, finalize, RunArtifacts
 from review import ReviewRound
+from gh import ForgeError, marker_key, PrRef
 
 
 class FakeRun:
@@ -15,6 +17,10 @@ class FakeRun:
             returncode = 0
             stdout = self.out
             stderr = ""
+        if argv[:3] == ["gh", "pr", "list"]:
+            P.stdout = "[]"
+        elif argv[:3] == ["gh", "pr", "view"]:
+            P.stdout = '{"comments": []}'
         return P()
 
 
@@ -27,30 +33,52 @@ def _artifacts(**over):
     return RunArtifacts(**base)
 
 
+OPEN_KEY = "test-open"
+FINALIZE_KEY = "test-finalize"
+
+
 def test_open_draft_commits_then_opens_pr():
     fake = FakeRun()
-    ref = open_draft("/repo", _artifacts(), sign=False, runner=fake)
+    ref = open_draft("/repo", _artifacts(), sign=False, idempotency_key=OPEN_KEY, runner=fake)
     seq = [argv[0] for argv, _ in fake.calls]
     assert seq[0] == "git" and seq[-1] == "gh" and ref.number == 9
     assert any(a[:3] == ["gh", "pr", "create"] for a, _ in fake.calls)
+    create_body = [stdin for argv, stdin in fake.calls
+                   if argv[:3] == ["gh", "pr", "create"]][0]
+    assert marker_key(create_body) == OPEN_KEY
+
+
+def test_publish_boundaries_fail_closed_before_any_mutation_without_keys():
+    fake = FakeRun()
+    with pytest.raises(ForgeError, match="non-empty idempotency key"):
+        open_draft("/repo", _artifacts(), sign=False, runner=fake)
+    assert fake.calls == []
+    with pytest.raises(ForgeError, match="non-empty idempotency key"):
+        finalize("/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"),
+                 _artifacts(), runner=fake)
+    assert fake.calls == []
 
 
 def test_finalize_sets_body_comments_then_ready_in_order():
     fake = FakeRun()
-    ref = open_draft("/repo", _artifacts(), sign=False, runner=fake)
+    ref = open_draft("/repo", _artifacts(), sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    res = finalize("/repo", ref, _artifacts(), autonomy="handoff", runner=fake)
-    gh_cmds = [argv[1:3] for argv, _ in fake.calls if argv[0] == "gh"]
+    res = finalize("/repo", ref, _artifacts(), autonomy="handoff",
+                   idempotency_key=FINALIZE_KEY, runner=fake)
+    gh_cmds = [argv[1:3] for argv, _ in fake.calls
+               if argv[0] == "gh" and argv[1:3] != ["pr", "view"]]
     assert gh_cmds == [["pr", "edit"], ["pr", "comment"], ["pr", "ready"]]   # handoff: no merge step
     assert res.tier == "green" and res.merged is False
 
 
 def test_finalize_assigns_after_marking_ready():
     fake = FakeRun()
-    ref = open_draft("/repo", _artifacts(), sign=False, runner=fake)
+    ref = open_draft("/repo", _artifacts(), sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    finalize("/repo", ref, _artifacts(), autonomy="handoff", assignee="@me", runner=fake)
-    gh_cmds = [argv for argv, _ in fake.calls if argv[0] == "gh"]
+    finalize("/repo", ref, _artifacts(), autonomy="handoff", assignee="@me",
+             idempotency_key=FINALIZE_KEY, runner=fake)
+    gh_cmds = [argv for argv, _ in fake.calls
+               if argv[0] == "gh" and argv[1:3] != ["pr", "view"]]
     assert gh_cmds[-2][:3] == ["gh", "pr", "ready"]
     assert gh_cmds[-1][-1] == "--add-assignee=@me"
 
@@ -60,17 +88,19 @@ SECRET = "sk-abcdefghijklmnopqrstuvwxyz0123"
 
 def test_open_draft_scrubs_stub_body():
     fake = FakeRun()
-    open_draft("/repo", _artifacts(goal=f"tok {SECRET} here"), sign=False, runner=fake)
-    create_stdin = [stdin for argv, stdin in fake.calls if argv[0] == "gh"][0]
+    open_draft("/repo", _artifacts(goal=f"tok {SECRET} here"), sign=False,
+               idempotency_key=OPEN_KEY, runner=fake)
+    create_stdin = [stdin for argv, stdin in fake.calls
+                    if argv[:3] == ["gh", "pr", "create"]][0]
     assert SECRET not in (create_stdin or "") and "***" in (create_stdin or "")
 
 
 def test_finalize_scrubs_body_and_comment():
     fake = FakeRun()
     art = _artifacts(goal=f"leak {SECRET}", consensus_notes="ok")
-    ref = open_draft("/repo", art, sign=False, runner=fake)
+    ref = open_draft("/repo", art, sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    finalize("/repo", ref, art, runner=fake)
+    finalize("/repo", ref, art, idempotency_key=FINALIZE_KEY, runner=fake)
     sent = "".join(stdin or "" for _, stdin in fake.calls)
     assert SECRET not in sent and "***" in sent
 
@@ -87,9 +117,9 @@ def test_finalize_threads_trace_into_body():
     # C5: finalize renders RunArtifacts.trace into the PR body via render_pr_body
     fake = FakeRun()
     art = _artifacts(trace=_trace())
-    ref = open_draft("/repo", art, sign=False, runner=fake)
+    ref = open_draft("/repo", art, sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    finalize("/repo", ref, art, runner=fake)
+    finalize("/repo", ref, art, idempotency_key=FINALIZE_KEY, runner=fake)
     edit_stdin = [stdin for argv, stdin in fake.calls if argv[:3] == ["gh", "pr", "edit"]][0]
     assert "Decision trace" in edit_stdin and "min" in edit_stdin
 
@@ -102,9 +132,9 @@ def test_finalize_scrubs_secret_in_trace():
                                 "why_stopped": f"DispatchError: leaked {SECRET}", "winner": False,
                                 "reverted": [f"turn 1: {SECRET}"]}])
     art = _artifacts(trace=trace, acceptance_k=0, acceptance_n=0)
-    ref = open_draft("/repo", art, sign=False, runner=fake)
+    ref = open_draft("/repo", art, sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    finalize("/repo", ref, art, runner=fake)
+    finalize("/repo", ref, art, idempotency_key=FINALIZE_KEY, runner=fake)
     sent = "".join(stdin or "" for _, stdin in fake.calls)
     assert SECRET not in sent and "***" in sent
 
@@ -112,8 +142,8 @@ def test_finalize_scrubs_secret_in_trace():
 def test_finalize_zero_acceptance_is_not_green():
     fake = FakeRun()
     art = _artifacts(acceptance_k=0, acceptance_n=0)
-    ref = open_draft("/repo", art, sign=False, runner=fake)
-    res = finalize("/repo", ref, art, runner=fake)
+    ref = open_draft("/repo", art, sign=False, idempotency_key=OPEN_KEY, runner=fake)
+    res = finalize("/repo", ref, art, idempotency_key=FINALIZE_KEY, runner=fake)
     assert res.tier == "red" and res.merged is False   # 0/0 acceptance is a false green (H5-class)
 
 
@@ -121,9 +151,9 @@ def test_finalize_cannot_merge_when_criterion_evidence_is_missing():
     fake = FakeRun()
     art = _artifacts(acceptance_k=2, acceptance_n=2,
                      acceptance_evidence={"C1": True, "C2": None})
-    ref = open_draft("/repo", art, sign=False, runner=fake)
+    ref = open_draft("/repo", art, sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    result = finalize("/repo", ref, art, runner=fake)
+    result = finalize("/repo", ref, art, idempotency_key=FINALIZE_KEY, runner=fake)
     assert result.tier == "yellow" and result.merged is False
     assert ["pr", "merge"] not in _gh_verbs(fake)
     edit_stdin = [stdin for argv, stdin in fake.calls if argv[:3] == ["gh", "pr", "edit"]][0]
@@ -132,7 +162,7 @@ def test_finalize_cannot_merge_when_criterion_evidence_is_missing():
 
     art = _artifacts(acceptance_k=1, acceptance_n=1,
                      acceptance_evidence={"WRONG-ID": True}, acceptance_ids=("C1",))
-    result = finalize("/repo", ref, art, runner=fake)
+    result = finalize("/repo", ref, art, idempotency_key=FINALIZE_KEY, runner=fake)
     assert result.tier == "yellow" and result.merged is False
 
 
@@ -141,23 +171,25 @@ def test_finalize_failing_criterion_evidence_is_red():
     art = _artifacts(acceptance_k=1, acceptance_n=2,
                      acceptance_evidence={"C1": True, "C2": False},
                      acceptance_ids=("C1", "C2"))
-    ref = open_draft("/repo", art, sign=False, runner=fake)
+    ref = open_draft("/repo", art, sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    result = finalize("/repo", ref, art, runner=fake)
+    result = finalize("/repo", ref, art, idempotency_key=FINALIZE_KEY, runner=fake)
     assert result.tier == "red" and result.merged is False
     assert ["pr", "merge"] not in _gh_verbs(fake)
 
 
 def _gh_verbs(fake):
-    return [argv[1:3] for argv, _ in fake.calls if argv[0] == "gh"]
+    return [argv[1:3] for argv, _ in fake.calls
+            if argv[0] == "gh" and argv[1:3] not in (["pr", "list"], ["pr", "view"])]
 
 
 def test_finalize_auto_merges_on_green():
     # A successful command only queues the merge when no exact-base confirmation is available.
     fake = FakeRun()
-    ref = open_draft("/repo", _artifacts(), sign=False, runner=fake)
+    ref = open_draft("/repo", _artifacts(), sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    res = finalize("/repo", ref, _artifacts(), runner=fake)   # default autonomy
+    res = finalize("/repo", ref, _artifacts(), idempotency_key=FINALIZE_KEY,
+                   runner=fake)   # default autonomy
     assert _gh_verbs(fake) == [["pr", "edit"], ["pr", "comment"], ["pr", "ready"], ["pr", "merge"]]
     assert res.tier == "green" and res.merged is False and res.state == "queued"
 
@@ -177,13 +209,16 @@ def test_finalize_marks_merged_only_after_forge_and_ancestry_confirmation():
                     if argv[:3] == ["gh", "pr", "create"]
                     else ""
                 )
+            if argv[:3] == ["gh", "pr", "list"]:
+                P.stdout = "[]"
             return P()
 
     fake = Confirmed()
-    ref = open_draft("/repo", _artifacts(), sign=False, runner=fake)
+    ref = open_draft("/repo", _artifacts(), sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
     result = finalize(
-        "/repo", ref, _artifacts(intended_base="base-sha"), runner=fake
+        "/repo", ref, _artifacts(intended_base="base-sha"),
+        idempotency_key=FINALIZE_KEY, runner=fake,
     )
     assert result.merged is True and result.state == "merged"
     assert any(argv[:4] == ["git", "merge-base", "--is-ancestor", "base-sha"]
@@ -192,10 +227,11 @@ def test_finalize_marks_merged_only_after_forge_and_ancestry_confirmation():
 
 def test_finalize_blocks_bodyless_changes_requested_and_inline_thread():
     fake = FakeRun()
-    ref = open_draft("/repo", ref_artifacts := _artifacts(), sign=False, runner=fake)
+    ref = open_draft("/repo", ref_artifacts := _artifacts(), sign=False,
+                     idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
     result = finalize(
-        "/repo", ref, ref_artifacts, runner=fake,
+        "/repo", ref, ref_artifacts, idempotency_key=FINALIZE_KEY, runner=fake,
         forge_feedback={
             "reviewDecision": "CHANGES_REQUESTED",
             "reviews": [{"state": "CHANGES_REQUESTED", "body": ""}],
@@ -204,6 +240,11 @@ def test_finalize_blocks_bodyless_changes_requested_and_inline_thread():
     )
     assert result.state == "blocked" and not result.merged
     assert not any(argv[:3] == ["gh", "pr", "merge"] for argv, _ in fake.calls)
+    comment_bodies = [stdin for argv, stdin in fake.calls
+                      if argv[:3] == ["gh", "pr", "comment"]]
+    assert len(comment_bodies) == 2
+    assert marker_key(comment_bodies[0]) == f"{FINALIZE_KEY}-review-comment"
+    assert marker_key(comment_bodies[1]) == f"{FINALIZE_KEY}-forge-blocker-comment"
 
 
 def test_finalize_never_auto_merges_yellow():
@@ -213,9 +254,9 @@ def test_finalize_never_auto_merges_yellow():
     art = _artifacts(review=ReviewRound(findings=[esc], routed=[], advisory=[], decision="verify",
                                         escalated=[esc]))
     fake = FakeRun()
-    ref = open_draft("/repo", art, sign=False, runner=fake)
+    ref = open_draft("/repo", art, sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    res = finalize("/repo", ref, art, runner=fake)
+    res = finalize("/repo", ref, art, idempotency_key=FINALIZE_KEY, runner=fake)
     assert res.tier == "yellow" and res.merged is False
     assert ["pr", "merge"] not in _gh_verbs(fake)
 
@@ -228,18 +269,19 @@ def test_finalize_never_auto_merges_red():
     art = _artifacts(review=ReviewRound(findings=[routed], routed=[routed], advisory=[],
                                         decision="route", escalated=[]))
     fake = FakeRun()
-    ref = open_draft("/repo", art, sign=False, runner=fake)
+    ref = open_draft("/repo", art, sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    res = finalize("/repo", ref, art, runner=fake)
+    res = finalize("/repo", ref, art, idempotency_key=FINALIZE_KEY, runner=fake)
     assert res.tier == "red" and res.merged is False
     assert ["pr", "merge"] not in _gh_verbs(fake)
 
 
 def test_finalize_handoff_never_merges_even_on_green():
     fake = FakeRun()
-    ref = open_draft("/repo", _artifacts(), sign=False, runner=fake)
+    ref = open_draft("/repo", _artifacts(), sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    res = finalize("/repo", ref, _artifacts(), autonomy="handoff", runner=fake)
+    res = finalize("/repo", ref, _artifacts(), autonomy="handoff",
+                   idempotency_key=FINALIZE_KEY, runner=fake)
     assert res.tier == "green" and res.merged is False
     assert ["pr", "merge"] not in _gh_verbs(fake)
 
@@ -259,8 +301,8 @@ def test_finalize_merge_failure_degrades_to_handoff():
             return super().__call__(argv, **kw)
 
     fake = MergeFails()
-    ref = open_draft("/repo", _artifacts(), sign=False, runner=fake)
+    ref = open_draft("/repo", _artifacts(), sign=False, idempotency_key=OPEN_KEY, runner=fake)
     fake.calls.clear()
-    res = finalize("/repo", ref, _artifacts(), runner=fake)
+    res = finalize("/repo", ref, _artifacts(), idempotency_key=FINALIZE_KEY, runner=fake)
     assert res.tier == "green" and res.merged is False        # merge refused -> ready PR left for human
     assert ["pr", "ready"] in _gh_verbs(fake)
