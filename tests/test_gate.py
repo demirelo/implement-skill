@@ -166,6 +166,22 @@ def test_lean_conformance_fixture_is_exactly_toolchain_pinned():
     cfg = detect_adapter(fixture)
     assert cfg["name"] == "lean-lake"
     assert (fixture / "lean-toolchain").read_text().strip() == "leanprover/lean4:v4.33.1"
+    assert cfg["lockfile_policy"] == {
+        "files": ["lake-manifest.json"],
+        "mode": "required-when-dependencies-exist",
+    }
+    preparation = cfg["dependency_preparation"]
+    assert preparation["command"] == "lake update"
+    assert preparation["network"] == "explicit-only"
+    assert preparation["runs_in_gate"] is False
+    assert json.loads((fixture / "lake-manifest.json").read_text()) == {
+        "version": "1.2.0",
+        "packagesDir": ".lake/packages",
+        "packages": [],
+        "name": "SampleLeanConformance",
+        "lakeDir": ".lake",
+        "fixedToolchain": False,
+    }
     assert [path.relative_to(fixture).as_posix() for path in oracle_paths(fixture, cfg)] == [
         "Tests/Smoke.lean"
     ]
@@ -334,7 +350,22 @@ def test_guard_denial_is_phase_specific_and_never_runs_command(tmp_path, monkeyp
 @pytest.mark.parametrize("command", [
     "npx vitest run",
     "npm exec vitest run",
+    "npm i vitest",
+    "npm add vitest",
     "python -m pip install -r requirements.txt",
+    "python -m pip download pytest",
+    "pip download pytest",
+    "pip wheel pytest",
+    "uv add pytest",
+    "uv sync",
+    "uv run pytest",
+    "uv tool run ruff",
+    "uv lock",
+    "pnpm dlx vitest",
+    "pnpm fetch",
+    "yarn dlx vitest",
+    "yarn fetch",
+    "bun x vitest",
 ])
 def test_gate_rejects_implicit_dependency_install(command, tmp_path, monkeypatch):
     repo = _make_repo(tmp_path, "pyproject.toml")

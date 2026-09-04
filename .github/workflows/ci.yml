@@ -82,13 +82,28 @@ jobs:
               raise SystemExit(f"TypeScript adapter gate failed: {result.summary}")
           PY
 
-      - name: Vitest conformance (expected red)
+      - name: Adapter gate conformance (TypeScript expected red)
         working-directory: tests/fixtures/sample_ts_repo
         run: |
-          if npm exec --no -- vitest run --config vitest.red.config.ts --reporter=dot --no-color; then
-            echo "the deliberately broken Vitest oracle unexpectedly passed"
-            exit 1
-          fi
+          PYTHONPATH=../../../skills/implement/scripts python - <<'PY'
+          from pathlib import Path
+
+          from gate import detect_adapter, run_gate
+
+          repo = Path.cwd()
+          adapter = dict(detect_adapter(repo))
+          adapter["test_cmd"] = (
+              "npm exec --no -- vitest run --config vitest.red.config.ts "
+              "--reporter=dot --no-color"
+          )
+          result = run_gate(repo, adapter)
+          for name, phase in result.phase_results.items():
+              print(f"{name}: {'PASS' if phase.passed else 'FAIL'}")
+              print(phase.evidence)
+          test_phase = result.phase_results.get("test")
+          if result.passed or test_phase is None or test_phase.passed:
+              raise SystemExit("the deliberately broken Vitest oracle unexpectedly passed")
+          PY
 
   lean-lake:
     runs-on: ubuntu-latest
@@ -123,10 +138,22 @@ jobs:
               raise SystemExit(f"Lean adapter gate failed: {result.summary}")
           PY
 
-      - name: Acceptance module conformance (expected red)
+      - name: Adapter gate conformance (Lean expected red)
         working-directory: tests/fixtures/sample_lean_repo
         run: |
-          if lake env lean Fixtures/Red.lean; then
-            echo "the deliberately broken Lean oracle unexpectedly passed"
-            exit 1
-          fi
+          PYTHONPATH=../../../skills/implement/scripts python - <<'PY'
+          from pathlib import Path
+
+          from gate import detect_adapter, run_gate
+
+          repo = Path.cwd()
+          adapter = dict(detect_adapter(repo))
+          adapter["test_cmd"] = "lake env lean Fixtures/Red.lean"
+          result = run_gate(repo, adapter)
+          for name, phase in result.phase_results.items():
+              print(f"{name}: {'PASS' if phase.passed else 'FAIL'}")
+              print(phase.evidence)
+          test_phase = result.phase_results.get("test")
+          if result.passed or test_phase is None or test_phase.passed:
+              raise SystemExit("the deliberately broken Lean oracle unexpectedly passed")
+          PY

@@ -21,13 +21,17 @@ worktree (which is read back out as the diff). Paths are validated against SBPL 
 `guard.classify(argv)` gates every command the harness itself runs (test, lint, type, custom, and
 expanded `test_one`). Network-capable dependency preparation is an explicit adapter step and is
 never run by `run_gate`; `npx`, installing `npm`/`pip`/`pnpm` phases, and an unqualified `npm exec`
-are rejected.
+are rejected. Common package-manager install/fetch aliases (`npm i/add`, `pip download/wheel`,
+`uv add/sync/run/tool/lock`, `pnpm`/`yarn` `dlx`/`fetch`, `bun x`, and related verbs) are denied in
+gate phases as well.
 **Allowlist-first**: the command head must be a known gate/install tool (pytest/ruff/mypy/uv/…);
 anything else (rm/find/chown/curl/sh/sudo/dd/nc) is denied even without a deny-pattern match. A deny
 overlay catches dangerous uses of allowlisted tools (interpreter `-c`, `git push --force`,
-`pip install` from a URL). Lean multiplexers receive verb-level validation: `lake build` and
-`lake env lean <module>` are admitted; dependency mutation, arbitrary `lake env` programs, and elan
-install/update/removal are denied. A denied command aborts the candidate.
+`pip install` from a URL). This static list is defense in depth, not a proof for arbitrary `make` or
+`tox` command semantics: a real sandbox's network denial is the final backstop. Lean multiplexers
+receive verb-level validation: `lake build` and `lake env lean <module>` are admitted; dependency
+mutation, arbitrary `lake env` programs, and elan install/update/removal are denied. A denied command
+aborts the candidate.
 
 ## 4. Worktree isolation (`workspace.py`)
 Candidates compete in isolated copies; for a real git repo, `create_worktree` puts them in in-project

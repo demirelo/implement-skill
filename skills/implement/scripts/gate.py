@@ -215,17 +215,25 @@ def _network_install_reason(argv: list[str]) -> str:
     if head == "npx" and "--no-install" not in rest:
         return "npx may install from the network; use an explicit preparation step and --no-install"
     if head == "npm":
-        if "install" in rest or "ci" in rest or "update" in rest:
+        if any(token in {"install", "i", "ci", "add", "update", "uninstall", "remove",
+                        "link", "rebuild", "dedupe", "prune"} for token in rest):
             return "npm dependency installation is preparation, not a gate phase"
         if "exec" in rest and not ({"--no", "--no-install"} & set(rest)):
             return "npm exec may install from the network; add --no"
-    if head in {"pip", "pip3", "uv"} and "install" in rest:
-        return "dependency installation is preparation, not a gate phase"
-    if head.startswith("python") and rest[:2] == ["-m", "pip"] and "install" in rest[2:]:
-        return "dependency installation is preparation, not a gate phase"
-    if head in {"pnpm", "yarn", "bun"} and any(token in {"install", "add", "update"}
-                                                  for token in rest):
-        return "dependency installation is preparation, not a gate phase"
+    if head in {"pip", "pip3"} and any(token in {"install", "download", "wheel"}
+                                         for token in rest):
+        return "pip dependency installation/download is preparation, not a gate phase"
+    if head == "uv" and any(token in {"install", "add", "sync", "run", "tool", "lock"}
+                             for token in rest):
+        return "uv dependency installation/resolution is preparation, not a gate phase"
+    if (head.startswith("python") and rest[:2] == ["-m", "pip"]
+            and any(token in {"install", "download", "wheel"} for token in rest[2:])):
+        return "pip dependency installation/download is preparation, not a gate phase"
+    if head in {"pnpm", "yarn"} and any(token in {"install", "i", "add", "update", "dlx",
+                                                 "fetch"} for token in rest):
+        return "package-manager installation/fetch is preparation, not a gate phase"
+    if head == "bun" and any(token in {"x", "add", "install", "update"} for token in rest):
+        return "bun package installation/execution is preparation, not a gate phase"
     if head == "lake":
         # `guard.classify` currently rejects these verb forms before this helper runs.  Keep an
         # independent deny here as defense in depth: a future guard expansion must not turn a
