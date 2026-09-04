@@ -6,10 +6,11 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from gate import run_gate
 from execute import _reset
 from apply_patch import apply_patch
+from verification import VerificationContext
 
 
 @dataclass(frozen=True)
@@ -199,11 +200,18 @@ def route_decision(findings) -> ReviewRound:
                        decision=decision, escalated=escalated)
 
 
-def re_gate(repo, winner_diff, adapter, wrap=None) -> ReGate:
+def re_gate(repo, winner_diff, adapter, verification_context=None) -> ReGate:
+    if not isinstance(verification_context, VerificationContext):
+        raise ValueError("a VerificationContext is required for review regate")
+    repo_root = Path(repo).resolve(strict=False)
+    if verification_context.repo_root != repo_root:
+        raise ValueError("VerificationContext does not belong to the review repository")
+    if verification_context.adapter != adapter:
+        raise ValueError("VerificationContext does not belong to the selected gate adapter")
     applied = apply_patch(repo, winner_diff)
     if not applied.ok:
         return ReGate(passed=False, executed=0, summary=f"winner diff did not apply: {applied.error[:120]}")
-    gr = run_gate(repo, adapter, wrap=wrap)   # H6: re-gate the winner under the sandbox too
+    gr = verification_context.run_gate()   # H6: re-gate the winner under the sandbox too
     if not gr.passed:
         _reset(repo)   # H4: a non-green winner is rolled back
         return ReGate(passed=False, executed=0, summary=gr.summary)

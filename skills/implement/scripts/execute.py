@@ -10,10 +10,10 @@ from pathlib import Path
 
 import guard
 import kill
-from gate import run_gate
 from apply_patch import apply_patch
-from scrub import is_secret_file, scrub, env_secrets
+from scrub import is_secret_file, scrub
 from lean_support import hydrate_lean_cache
+from verification import VerificationContext
 
 # heavy/generated dirs to skip when copying a candidate workspace (H8). Only dirs that are
 # gitignored by universal convention — NOT build/dist, which a repo can legitimately track.
@@ -21,6 +21,8 @@ _HEAVY_IGNORE = shutil.ignore_patterns(
     ".git", ".lake", ".venv", "venv", "node_modules", "__pycache__", ".worktrees",
     ".mypy_cache", ".pytest_cache", ".ruff_cache")
 _CONTEXT_GLOBS = ("*.py", "*.lean", "lakefile.toml", "lakefile.lean", "lean-toolchain")
+_SKIP_CONTEXT_DIRS = {".git", ".lake", ".worktrees", ".venv", "venv", "node_modules",
+                      "__pycache__"}
 
 
 @dataclass
@@ -36,10 +38,59 @@ class LoopResult:
     ledger: list = field(default_factory=list)
 
 
-def _copy_repo(repo_path) -> str:
+def _validate_repo_symlink(path: Path, repo_root: Path) -> None:
+    """Reject links that cannot be reproduced without retaining a host escape hatch."""
+    target = os.readlink(path)
+    if os.path.isabs(target):
+        raise ValueError(f"absolute symlink target is not safe to copy: {path}")
+    resolved = path.resolve(strict=False)
+    try:
+        resolved.relative_to(repo_root)
+    except ValueError as exc:
+        raise ValueError(f"symlink escapes repository: {path} -> {target}") from exc
+
+
+def _audit_repo_symlinks(repo_path, allow_files=()) -> Path:
+    repo_root = Path(repo_path).resolve(strict=False)
+    if not repo_root.is_dir():
+        raise ValueError(f"repository root is not a directory: {repo_path}")
+    allowed = set(allow_files)
+    for root, dirs, files in os.walk(repo_root, followlinks=False):
+        # Keep this traversal in lockstep with copytree's ignore filter. In particular, a normal
+        # virtualenv may contain a symlink to an interpreter outside the checkout; that entire
+        # generated tree is omitted and must not make an otherwise safe copy fail closed.
+        ignored = set(_HEAVY_IGNORE(root, [*dirs, *files]))
+        dirs[:] = [name for name in dirs if name not in ignored]
+        for name in (*dirs, *files):
+            if name in ignored:
+                continue
+            path = Path(root) / name
+            if path.is_symlink():
+                rel = path.relative_to(repo_root).as_posix()
+                if is_secret_file(path) and rel not in allowed:
+                    continue
+                _validate_repo_symlink(path, repo_root)
+    return repo_root
+
+
+def _copy_repo(repo_path, allow_files=()) -> str:
+    allowed = set(_normalize_required_paths(allow_files))
+    source = _audit_repo_symlinks(repo_path, allowed)
     tmp = tempfile.mkdtemp(prefix="impl_")
     dst = Path(tmp) / "repo"
-    shutil.copytree(repo_path, dst, ignore=_HEAVY_IGNORE)
+
+    def ignore(base, names):
+        ignored = set(_HEAVY_IGNORE(base, names))
+        base_path = Path(base)
+        for name in names:
+            path = base_path / name
+            rel = path.relative_to(source).as_posix()
+            if is_secret_file(path) and rel not in allowed:
+                ignored.add(name)
+        return ignored
+
+    # Preserve safe relative links, but never dereference them into the source checkout or host.
+    shutil.copytree(source, dst, ignore=ignore, symlinks=True)
     subprocess.run(["git", "init", "-q"], cwd=dst)
     subprocess.run(["git", "add", "-A"], cwd=dst)
     subprocess.run(["git", "-c", "user.email=impl@local", "-c", "user.name=impl",
@@ -50,16 +101,19 @@ def _copy_repo(repo_path) -> str:
 
 
 def _repo_context(repo_path, max_chars=12000) -> str:
+    repo = _audit_repo_symlinks(repo_path)
     chunks, total = [], 0
     paths: set[Path] = set()
-    for root, dirs, files in os.walk(repo_path):
-        dirs[:] = [d for d in dirs if d not in {".git", ".lake", ".worktrees", ".venv",
-                                                "venv", "node_modules", "__pycache__"}]
+    for root, dirs, files in os.walk(repo, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in _SKIP_CONTEXT_DIRS]
         paths.update(Path(root) / name for name in files
                      if any(Path(name).match(pattern) for pattern in _CONTEXT_GLOBS))
     for path in sorted(paths):
-        rel = path.relative_to(repo_path)
+        rel = path.relative_to(repo)
         if {".git", ".lake", ".worktrees"}.intersection(rel.parts) or is_secret_file(path):
+            continue
+        resolved = path.resolve(strict=False)
+        if is_secret_file(resolved):
             continue
         try:
             chunk = f"=== {rel} ===\n{path.read_text()}"
@@ -138,10 +192,25 @@ def _required_paths_feedback(repo_path, required_paths, *, must_change=True) -> 
     return "; ".join(failures)
 
 
+def _validate_verification_context(repo_path, adapter, verification_context):
+    if not isinstance(verification_context, VerificationContext):
+        raise ValueError("a VerificationContext is required for candidate verification")
+    root = Path(repo_path).resolve(strict=False)
+    if verification_context.repo_root != root:
+        raise ValueError("VerificationContext does not belong to the candidate repository")
+    if verification_context.adapter != adapter:
+        raise ValueError("VerificationContext does not belong to the selected gate adapter")
+    return verification_context
+
+
 def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, secrets=None,
-                   wrap=None, crit=None, panel_context="", repo_ctx=None,
-                   force_turn=False, required_paths=(), required_paths_must_change=True) -> LoopResult:
-    secrets = env_secrets() if secrets is None else secrets
+                   crit=None, panel_context="", repo_ctx=None,
+                   force_turn=False, required_paths=(), required_paths_must_change=True,
+                   verification_context=None) -> LoopResult:
+    verification_context = _validate_verification_context(repo_path, adapter, verification_context)
+    runtime_secrets = list(verification_context.secret_values)
+    secrets = runtime_secrets if secrets is None else list(secrets)
+    secrets = list(dict.fromkeys([*secrets, *runtime_secrets]))
     required_paths = _normalize_required_paths(required_paths)
     # command-layer gate: refuse a destructive harness command (adapter test_cmd) before running it
     if not guard.classify(shlex.split(adapter["test_cmd"])).safe:
@@ -157,7 +226,7 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
     repo_ctx = _repo_context(repo_path) if repo_ctx is None else repo_ctx
     ledger: list = []      # human-readable, fed to the Builder prompt
     turns_log: list = []   # structured, fed to kill.should_stop
-    gate_result = run_gate(repo_path, adapter, wrap=wrap)   # turn 0: FULL suite — establishes the oracle
+    gate_result = verification_context.run_gate()   # turn 0: FULL suite — establishes the oracle
     if gate_result.passed:   # H5: a "green" with 0 executed tests is a false green (no oracle), not success
         if gate_result.verified_count > 0 and not force_turn:
             return LoopResult(success=True, turns=0)
@@ -183,7 +252,7 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
             turns_log.append({"failing": list(failing), "applied": False,
                               "denied": True, "green_delta": 0})
         else:
-            scoped = run_gate(repo_path, adapter, wrap=wrap, only=failing) if scoped_ok else None
+            scoped = verification_context.run_gate(only=failing) if scoped_ok else None
             if scoped is not None and not scoped.passed:   # target still red — skip the full suite
                 delta = scoped.passing_count - prev_pass
                 prev_pass = scoped.passing_count
@@ -193,7 +262,7 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
                                   "denied": False, "green_delta": delta})
                 gate_result = scoped
             else:   # target green (or unscoped) — FULL confirm catches regressions + enforces H5
-                full = run_gate(repo_path, adapter, wrap=wrap)
+                full = verification_context.run_gate()
                 if full.passed and full.verified_count > 0:
                     artifact_failure = _required_paths_feedback(
                         repo_path, required_paths, must_change=required_paths_must_change
@@ -245,28 +314,51 @@ def _diff_size(diff) -> int:
 
 
 def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secrets=None,
-                  wrap=None, crit=None, panel_context=None, repo_ctx=None,
-                  force_turn=False, required_paths=(), required_paths_must_change=True) -> BestResult:
-    secrets = env_secrets() if secrets is None else secrets
+                  crit=None, panel_context=None, repo_ctx=None,
+                  force_turn=False, required_paths=(), required_paths_must_change=True,
+                  verification_context=None) -> BestResult:
+    verification_context = _validate_verification_context(repo_path, adapter, verification_context)
+    runtime_secrets = list(verification_context.secret_values)
+    secrets = runtime_secrets if secrets is None else list(secrets)
+    secrets = list(dict.fromkeys([*secrets, *runtime_secrets]))
     panel_context = panel_context or {}
     # Each candidate competes in its OWN isolated copy of the repo, created + torn down inside its own
     # thread — the copies are independent (no shared git lock), so creation parallelizes with the loop
-    # and every candidate is graded against the *identical* tree (tracked + gitignored config alike;
-    # only _HEAVY_IGNORE dirs are skipped). (A git-worktree fast-path was tried and rejected: it forks
-    # the oracle across candidates, drops HEAD-absent gitignored files, and breaks git-writing tests
-    # under the sandbox.)
+    # and every candidate is graded against the same safe materialization (tracked + non-secret
+    # untracked files, plus the context's explicit runtime allowlist; heavy files remain excluded).
+    # (A git-worktree fast-path was tried and rejected: it forks the oracle across candidates, drops
+    # HEAD-absent runtime files, and breaks git-writing tests under the sandbox.)
     candidates: dict = {}
 
     def _run(name):
-        work = _copy_repo(repo_path)
+        work = None
+        candidate_context = None
         try:
-            return run_inner_loop(work, task_brief, adapter, dispatchers[name], max_turns, secrets,
-                                  wrap=wrap, crit=crit, panel_context=panel_context.get(name, ""),
-                                  repo_ctx=repo_ctx, force_turn=force_turn,
-                                  required_paths=required_paths,
-                                  required_paths_must_change=required_paths_must_change)
+            work = _copy_repo(
+                repo_path,
+                allow_files=verification_context.allowed_runtime_files,
+            )
+            candidate_context = verification_context.child(work, adapter)
+            return run_inner_loop(
+                work,
+                task_brief,
+                adapter,
+                dispatchers[name],
+                max_turns,
+                secrets,
+                crit=crit,
+                panel_context=panel_context.get(name, ""),
+                repo_ctx=repo_ctx,
+                force_turn=force_turn,
+                required_paths=required_paths,
+                required_paths_must_change=required_paths_must_change,
+                verification_context=candidate_context,
+            )
         finally:
-            shutil.rmtree(Path(work).parent, ignore_errors=True)
+            if candidate_context is not None:
+                candidate_context.close()
+            if work is not None:
+                shutil.rmtree(Path(work).parent, ignore_errors=True)
 
     with ThreadPoolExecutor(max_workers=min(len(dispatchers), 8) or 1) as ex:
         futs = {name: ex.submit(_run, name) for name in dispatchers}

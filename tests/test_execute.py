@@ -3,8 +3,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
 from gate import detect_adapter, run_gate
 from execute import run_inner_loop, _copy_repo
+from verification import VerificationContext
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
+
+
+def _trusted_context(repo, adapter):
+    return VerificationContext(repo, True, adapter, {}, available=["none"])
 
 MULTIPLY_FIX = (
     "--- a/mathx/ops.py\n"
@@ -41,13 +46,15 @@ MULTIPLY_FIX_WITH_ARTIFACT = MULTIPLY_FIX + (
 def test_inner_loop_reaches_green_in_one_turn():
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     seen = []
 
     def fake(prompt):
         seen.append(prompt)
         return MULTIPLY_FIX
 
-    result = run_inner_loop(work, "add multiply()", adapter, fake, max_turns=3)
+    result = run_inner_loop(work, "add multiply()", adapter, fake, max_turns=3,
+                            verification_context=ctx)
     assert result.success is True
     assert result.turns == 1
     assert "def add(a, b)" in seen[0]  # the OW model is shown the repo source
@@ -61,20 +68,23 @@ def test_inner_loop_refuses_vacuous_green(tmp_path):
     (repo / "tests" / "test_skip.py").write_text(
         "import pytest\npytestmark = pytest.mark.skip(reason='x')\ndef test_a():\n    assert True\n")
     adapter = detect_adapter(str(repo))
-    res = run_inner_loop(str(repo), "x", adapter, lambda p: "", max_turns=1)
+    res = run_inner_loop(str(repo), "x", adapter, lambda p: "", max_turns=1,
+                         verification_context=_trusted_context(repo, adapter))
     assert res.success is False and "vacuous" in res.error
 
 
 def test_failure_is_fed_back_into_next_prompt():
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     prompts = []
 
     def flaky(prompt):
         prompts.append(prompt)
         return NOOP_PATCH if len(prompts) == 1 else MULTIPLY_FIX
 
-    result = run_inner_loop(work, "add multiply()", adapter, flaky, max_turns=3)
+    result = run_inner_loop(work, "add multiply()", adapter, flaky, max_turns=3,
+                            verification_context=ctx)
     assert result.success is True
     assert "still failing" in prompts[1]
     assert "# noop" not in (Path(work) / "mathx" / "ops.py").read_text()  # failed turn fully reverted
@@ -86,6 +96,7 @@ def test_failed_apply_resets_tracked_and_untracked_candidate_changes(monkeypatch
 
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     calls = []
     real_apply = execute.apply_patch
 
@@ -104,6 +115,7 @@ def test_failed_apply_resets_tracked_and_untracked_candidate_changes(monkeypatch
         adapter,
         lambda _prompt: MULTIPLY_FIX,
         max_turns=2,
+        verification_context=ctx,
     )
     assert result.success is True
     assert len(calls) == 2
@@ -114,6 +126,7 @@ def test_failed_apply_resets_tracked_and_untracked_candidate_changes(monkeypatch
 def test_required_artifacts_reject_partial_green_patch_and_retry():
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     prompts = []
 
     def partial_then_complete(prompt):
@@ -127,6 +140,7 @@ def test_required_artifacts_reject_partial_green_patch_and_retry():
         partial_then_complete,
         max_turns=2,
         required_paths=("RESULT.md",),
+        verification_context=ctx,
     )
 
     assert result.success is True
@@ -138,6 +152,7 @@ def test_required_artifacts_reject_partial_green_patch_and_retry():
 def test_required_artifacts_can_be_existence_only_for_repair():
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     strict = run_inner_loop(
         work,
         "add multiply()",
@@ -145,6 +160,7 @@ def test_required_artifacts_can_be_existence_only_for_repair():
         lambda _prompt: MULTIPLY_FIX,
         max_turns=1,
         required_paths=("pyproject.toml",),
+        verification_context=ctx,
     )
     assert strict.success is False
     assert "required artifacts not changed: pyproject.toml" in strict.ledger[0]
@@ -158,6 +174,7 @@ def test_required_artifacts_can_be_existence_only_for_repair():
         max_turns=1,
         required_paths=("pyproject.toml",),
         required_paths_must_change=False,
+        verification_context=_trusted_context(repair_work, detect_adapter(repair_work)),
     )
     assert repair.success is True
 
@@ -166,6 +183,7 @@ def test_required_artifacts_reject_path_traversal():
     import pytest
 
     work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
     with pytest.raises(ValueError, match="safe repository-relative"):
         run_inner_loop(
             work,
@@ -173,6 +191,7 @@ def test_required_artifacts_reject_path_traversal():
             detect_adapter(work),
             lambda _prompt: MULTIPLY_FIX,
             required_paths=("../outside",),
+            verification_context=_trusted_context(work, adapter),
         )
 
 
@@ -194,13 +213,15 @@ def test_loop_result_captures_revert_ledger():
     # C1: the per-turn ledger run_inner_loop builds must survive into LoopResult
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     calls = []
 
     def flaky(prompt):
         calls.append(prompt)
         return NOOP_PATCH if len(calls) == 1 else MULTIPLY_FIX
 
-    result = run_inner_loop(work, "add multiply()", adapter, flaky, max_turns=3)
+    result = run_inner_loop(work, "add multiply()", adapter, flaky, max_turns=3,
+                            verification_context=ctx)
     assert result.success is True
     assert len(result.ledger) == 1                                  # exactly the one reverted attempt
     assert "still failing" in result.ledger[0]                      # and it records what was reverted
@@ -211,11 +232,13 @@ def test_best_of_n_preserves_candidate_ledgers():
     from execute import run_best_of_n
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     dispatchers = {
         "wrong": lambda p: NOOP_PATCH,     # never fixes -> reverts every turn
         "min": lambda p: MULTIPLY_FIX,     # wins turn 1, reverts nothing
     }
-    best = run_best_of_n(work, "add multiply()", adapter, dispatchers, max_turns=2)
+    best = run_best_of_n(work, "add multiply()", adapter, dispatchers, max_turns=2,
+                         verification_context=ctx)
     assert best.winner == "min"
     assert best.candidates["wrong"].ledger          # the failing candidate's attempts are kept
     assert best.candidates["min"].ledger == []      # the clean winner reverted nothing
@@ -226,12 +249,14 @@ def test_decision_trace_summarizes_competition():
     from execute import run_best_of_n, decision_trace
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     dispatchers = {
         "verbose": lambda p: VERBOSE_FIX,   # green, larger diff
         "min": lambda p: MULTIPLY_FIX,      # green, smallest diff -> winner
         "wrong": lambda p: NOOP_PATCH,      # never green
     }
-    best = run_best_of_n(work, "add multiply()", adapter, dispatchers, max_turns=2)
+    best = run_best_of_n(work, "add multiply()", adapter, dispatchers, max_turns=2,
+                         verification_context=ctx)
     t = decision_trace(best)
     assert t["winner"] == "min"
     assert {c["name"] for c in t["candidates"]} == {"verbose", "min", "wrong"}   # all competitors
@@ -247,7 +272,8 @@ def test_decision_trace_no_green_winner():
     from execute import run_best_of_n, decision_trace
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
-    best = run_best_of_n(work, "add multiply()", adapter, {"a": lambda p: NOOP_PATCH}, max_turns=2)
+    best = run_best_of_n(work, "add multiply()", adapter, {"a": lambda p: NOOP_PATCH},
+                         max_turns=2, verification_context=_trusted_context(work, adapter))
     t = decision_trace(best)
     assert t["winner"] == "" and t["margin"] is None and t["winner_size"] is None
     assert [c["name"] for c in t["candidates"]] == ["a"]
@@ -258,12 +284,14 @@ def test_best_of_n_picks_smallest_green_and_materializes_it():
     from execute import run_best_of_n
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     dispatchers = {
         "wrong": lambda p: NOOP_PATCH,
         "min": lambda p: MULTIPLY_FIX,
         "verbose": lambda p: VERBOSE_FIX,
     }
-    best = run_best_of_n(work, "add multiply()", adapter, dispatchers, max_turns=2)
+    best = run_best_of_n(work, "add multiply()", adapter, dispatchers, max_turns=2,
+                         verification_context=ctx)
     assert best.winner == "min"
     assert best.applied is True
     assert run_gate(work, adapter).passed is True  # winner actually applied to the repo
@@ -273,6 +301,7 @@ def test_best_of_n_survives_a_provider_exception():
     from execute import run_best_of_n, DispatchError
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
 
     def boom(prompt):
         raise DispatchError("deepseek dispatch failed: 1Password locked")
@@ -281,7 +310,8 @@ def test_best_of_n_survives_a_provider_exception():
         "broken": boom,                  # raises — must NOT abort the whole best-of-N
         "good": lambda p: MULTIPLY_FIX,  # still expected to win
     }
-    best = run_best_of_n(work, "add multiply()", adapter, dispatchers, max_turns=2)
+    best = run_best_of_n(work, "add multiply()", adapter, dispatchers, max_turns=2,
+                         verification_context=ctx)
     assert best.winner == "good"
     assert best.applied is True
     assert run_gate(work, adapter).passed is True
@@ -354,7 +384,8 @@ def test_best_of_n_reports_scrubbed_diff_but_applies_raw():
     from execute import run_best_of_n
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
-    best = run_best_of_n(work, "add multiply()", adapter, {"k": lambda p: KEY_FIX}, max_turns=2)
+    best = run_best_of_n(work, "add multiply()", adapter, {"k": lambda p: KEY_FIX}, max_turns=2,
+                         verification_context=_trusted_context(work, adapter))
     assert best.applied is True
     assert run_gate(work, adapter).passed is True                       # the RAW diff was applied
     assert "sk-abcdefghijklmnopqrstuvwxyz0123" not in best.diff          # reported diff scrubbed
@@ -376,6 +407,7 @@ def test_best_of_n_threads_per_model_panel_context():
     from execute import run_best_of_n
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     seen = {}
 
     def make(name, diff):
@@ -386,7 +418,8 @@ def test_best_of_n_threads_per_model_panel_context():
 
     best = run_best_of_n(work, "add multiply()", adapter,
                          {"a": make("a", MULTIPLY_FIX), "b": make("b", VERBOSE_FIX)},
-                         max_turns=2, panel_context={"a": "CTX_FOR_A_ONLY"})
+                         max_turns=2, panel_context={"a": "CTX_FOR_A_ONLY"},
+                         verification_context=ctx)
     assert best.applied is True
     assert "CTX_FOR_A_ONLY" in seen["a"]
     assert "CTX_FOR_A_ONLY" not in seen["b"]     # ledger isolation holds through dispatch
@@ -407,17 +440,25 @@ def test_two_tier_full_confirm_catches_regression():
     # green — scoped(test_multiply) passes, but the full-suite confirm sees test_add regress.
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
-    res = run_inner_loop(work, "add multiply()", adapter, lambda p: REGRESSION_FIX, max_turns=1)
+    res = run_inner_loop(work, "add multiply()", adapter, lambda p: REGRESSION_FIX, max_turns=1,
+                         verification_context=_trusted_context(work, adapter))
     assert res.success is False
 
 
 def test_two_tier_skips_full_suite_while_scoped_is_red(monkeypatch):
     # #4: a turn whose scoped run is still red must NOT also pay for the full suite
-    import execute
     from gate import GateResult
     seq = []
+    import execute
+    monkeypatch.setattr(execute, "apply_patch",
+                        lambda repo, diff: type("A", (), {"ok": True, "error": ""})())
+    monkeypatch.setattr(execute, "_reset", lambda repo: None)
+    monkeypatch.setattr(execute, "_repo_context", lambda repo: "CTX")
+    adapter = {"test_cmd": "pytest -q", "test_one": "pytest {path} -q", "timeout": 60}
+    work = _copy_repo(FIXTURE)
+    context = _trusted_context(work, adapter)
 
-    def fake_gate(repo, adapter, wrap=None, only=None):
+    def context_gate(*, only=None):
         seq.append("scoped" if only else "full")
         if only is None:
             return (GateResult(passed=False, failing_tests=["t::a"]) if seq.count("full") == 1
@@ -425,13 +466,9 @@ def test_two_tier_skips_full_suite_while_scoped_is_red(monkeypatch):
         return (GateResult(passed=False, failing_tests=["t::a"]) if seq.count("scoped") == 1
                 else GateResult(passed=True, passing_count=1, verified_count=1))
 
-    monkeypatch.setattr(execute, "run_gate", fake_gate)
-    monkeypatch.setattr(execute, "apply_patch",
-                        lambda repo, diff: type("A", (), {"ok": True, "error": ""})())
-    monkeypatch.setattr(execute, "_reset", lambda repo: None)
-    monkeypatch.setattr(execute, "_repo_context", lambda repo: "CTX")
-    adapter = {"test_cmd": "pytest -q", "test_one": "pytest {path} -q", "timeout": 60}
-    res = run_inner_loop("/tmp/x", "brief", adapter, lambda p: "DIFF", max_turns=3)
+    context.run_gate = context_gate
+    res = run_inner_loop(str(work), "brief", adapter, lambda p: "DIFF", max_turns=3,
+                         verification_context=context)
     assert res.success is True and res.turns == 2
     assert seq == ["full", "scoped", "scoped", "full"]   # scoped-red turn skipped the full suite
 
@@ -445,10 +482,11 @@ def test_repo_context_computed_once_per_inner_loop(monkeypatch):
                         lambda repo, *a, **k: (n.__setitem__("reads", n["reads"] + 1) or real(repo, *a, **k)))
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     seq = []
     res = run_inner_loop(work, "brief", adapter,
                          lambda p: (seq.append(1), NOOP_PATCH if len(seq) == 1 else MULTIPLY_FIX)[1],
-                         max_turns=3)
+                         max_turns=3, verification_context=ctx)
     assert res.success is True and len(seq) == 2   # two dispatch turns
     assert n["reads"] == 1                          # but the repo was walked once
 
@@ -461,6 +499,7 @@ def test_best_of_n_runs_candidates_concurrently():
     from execute import run_best_of_n
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     barrier = threading.Barrier(2, timeout=15)
 
     def make(diff):
@@ -470,7 +509,8 @@ def test_best_of_n_runs_candidates_concurrently():
         return fn
 
     best = run_best_of_n(work, "add multiply()", adapter,
-                         {"a": make(MULTIPLY_FIX), "b": make(VERBOSE_FIX)}, max_turns=2)
+                         {"a": make(MULTIPLY_FIX), "b": make(VERBOSE_FIX)}, max_turns=2,
+                         verification_context=ctx)
     assert best.winner == "a" and best.applied is True   # both ran; smallest green wins
 
 
@@ -480,16 +520,68 @@ def test_best_of_n_candidate_order_is_deterministic():
     adapter = detect_adapter(work)
     best = run_best_of_n(work, "add multiply()", adapter,
                          {"z": lambda p: VERBOSE_FIX, "a": lambda p: MULTIPLY_FIX,
-                          "m": lambda p: NOOP_PATCH}, max_turns=2)
+                          "m": lambda p: NOOP_PATCH}, max_turns=2,
+                         verification_context=_trusted_context(work, adapter))
     assert list(best.candidates.keys()) == ["z", "a", "m"]   # preserves dispatchers order
     assert best.winner == "a"                                 # min diff among greens
 
 
+def test_best_of_n_propagates_runtime_allowlist_to_each_candidate(monkeypatch):
+    import execute
+    from execute import LoopResult, run_best_of_n
+
+    work = _copy_repo(FIXTURE)
+    (Path(work) / ".env").write_text("RUNTIME_ONLY=present\n")
+    adapter = {"name": "test-adapter"}
+    context = VerificationContext(
+        work,
+        True,
+        adapter,
+        {},
+        available=["none"],
+        allowed_runtime_files=(".env",),
+    )
+    copied_allowlists = []
+    candidate_values = []
+    real_copy = execute._copy_repo
+
+    def copy_with_spy(repo_path, allow_files=()):
+        copied_allowlists.append(tuple(allow_files))
+        return real_copy(repo_path, allow_files=allow_files)
+
+    def fake_loop(repo, *_args, **_kwargs):
+        candidate_values.append((Path(repo) / ".env").read_text())
+        return LoopResult(success=True, turns=1, diff="")
+
+    monkeypatch.setattr(execute, "_copy_repo", copy_with_spy)
+    monkeypatch.setattr(
+        execute,
+        "run_inner_loop",
+        fake_loop,
+    )
+    monkeypatch.setattr(
+        execute,
+        "apply_patch",
+        lambda *_args, **_kwargs: type("Applied", (), {"ok": True})(),
+    )
+    try:
+        run_best_of_n(
+            work,
+            "brief",
+            adapter,
+            {"a": lambda _prompt: "", "b": lambda _prompt: ""},
+            verification_context=context,
+        )
+    finally:
+        context.close()
+    assert len(copied_allowlists) == 2
+    assert all(allowlist == (".env",) for allowlist in copied_allowlists)
+    assert candidate_values == ["RUNTIME_ONLY=present\n", "RUNTIME_ONLY=present\n"]
+
+
 def test_copy_repo_includes_gitignored_non_heavy_files(tmp_path):
-    # #2 fidelity: a candidate must see the EXACT tree the user has — including gitignored runtime
-    # files (.env, local config, golden fixtures) that a HEAD-only git worktree would silently drop
-    # (the reason the worktree fast-path was rejected). copytree skips only the universally-
-    # regenerable heavy dirs (_HEAVY_IGNORE), never a config file.
+    # Non-secret untracked source remains available, while secret/config files are excluded unless
+    # an explicit runtime allowlist opts them in.
     src = tmp_path / "r"
     (src / "pkg").mkdir(parents=True)
     (src / "pkg" / "m.py").write_text("x = 1\n")
@@ -498,8 +590,75 @@ def test_copy_repo_includes_gitignored_non_heavy_files(tmp_path):
     (src / "__pycache__").mkdir()
     (src / "__pycache__" / "junk.pyc").write_text("cache\n")      # heavy -> must be skipped
     work = _copy_repo(str(src))
-    assert (Path(work) / ".env").read_text() == "LOCAL_CONFIG=needed-by-tests\n"   # config preserved
-    assert not (Path(work) / "__pycache__").exists()                                # heavy dir skipped
+    assert not (Path(work) / ".env").exists()
+    assert not (Path(work) / "__pycache__").exists()
+    allowed = _copy_repo(str(src), allow_files=(".env",))
+    assert (Path(allowed) / ".env").read_text() == "LOCAL_CONFIG=needed-by-tests\n"
+
+
+def test_copy_repo_rejects_out_of_root_symlink(tmp_path):
+    src = tmp_path / "r"
+    src.mkdir()
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("HOST_SECRET\n")
+    (src / "link.py").symlink_to(outside)
+    import pytest
+    with pytest.raises(ValueError, match="symlink"):
+        _copy_repo(src)
+
+
+def test_copy_repo_rejects_out_of_root_directory_symlink(tmp_path):
+    src = tmp_path / "r"
+    src.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("HOST_SECRET\n")
+    (src / "vendor").symlink_to(outside, target_is_directory=True)
+
+    import pytest
+    with pytest.raises(ValueError, match="symlink"):
+        _copy_repo(src)
+
+
+def test_copy_repo_ignores_external_symlink_inside_heavy_directory(tmp_path):
+    src = tmp_path / "r"
+    (src / ".venv" / "bin").mkdir(parents=True)
+    outside = tmp_path / "python"
+    outside.write_text("host interpreter\n")
+    (src / ".venv" / "bin" / "python").symlink_to(outside)
+    (src / "module.py").write_text("value = 1\n")
+
+    work = _copy_repo(src)
+
+    assert (Path(work) / "module.py").exists()
+    assert not (Path(work) / ".venv").exists()
+
+
+def test_repo_context_rejects_out_of_root_symlink(tmp_path):
+    src = tmp_path / "r"
+    src.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("HOST_SECRET\n")
+    (src / "link.py").symlink_to(outside)
+    from execute import _repo_context
+    import pytest
+    with pytest.raises(ValueError, match="symlink"):
+        _repo_context(src)
+
+
+def test_child_context_has_private_temp_and_closes(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    adapter = {"test_cmd": "pytest -q"}
+    parent = _trusted_context(repo, adapter)
+    child = parent.child(repo, adapter)
+    try:
+        assert child.tmpdir != parent.tmpdir
+        private = child.tmpdir
+    finally:
+        child.close()
+        parent.close()
+    assert not private.exists()
 
 
 def test_copy_repo_hydrates_lake_cache_without_tracking_or_prompting_it(tmp_path):
@@ -527,8 +686,10 @@ def test_best_of_n_candidates_are_isolated_copies():
     from execute import run_best_of_n
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     best = run_best_of_n(work, "add multiply()", adapter,
-                         {"good": lambda p: MULTIPLY_FIX, "noop": lambda p: NOOP_PATCH}, max_turns=2)
+                         {"good": lambda p: MULTIPLY_FIX, "noop": lambda p: NOOP_PATCH}, max_turns=2,
+                         verification_context=ctx)
     assert best.winner == "good" and best.candidates["noop"].success is False
     assert run_gate(work, adapter).passed is True   # winner materialized on the real repo, once resolved
 
@@ -538,6 +699,7 @@ def test_inner_loop_uses_injected_repo_ctx_instead_of_walking_tree():
     # supplied, the loop uses it verbatim and does NOT dump the full tree
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     seen = []
 
     def fake(prompt):
@@ -545,7 +707,7 @@ def test_inner_loop_uses_injected_repo_ctx_instead_of_walking_tree():
         return MULTIPLY_FIX
 
     res = run_inner_loop(work, "add multiply()", adapter, fake, max_turns=2,
-                         repo_ctx="FOCUSED_CTX_FROM_MCP")
+                         repo_ctx="FOCUSED_CTX_FROM_MCP", verification_context=ctx)
     assert res.success is True
     assert "FOCUSED_CTX_FROM_MCP" in seen[0]
     assert "def add(a, b)" not in seen[0]      # the blunt full-tree _repo_context was NOT used
@@ -555,6 +717,7 @@ def test_best_of_n_threads_injected_repo_ctx_to_candidates():
     from execute import run_best_of_n
     work = _copy_repo(FIXTURE)
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     seen = {}
 
     def mk(name, diff):
@@ -563,7 +726,8 @@ def test_best_of_n_threads_injected_repo_ctx_to_candidates():
             return diff
         return fn
 
-    run_best_of_n(work, "x", adapter, {"a": mk("a", MULTIPLY_FIX)}, max_turns=2, repo_ctx="MCP_CTX")
+    run_best_of_n(work, "x", adapter, {"a": mk("a", MULTIPLY_FIX)}, max_turns=2,
+                  repo_ctx="MCP_CTX", verification_context=ctx)
     assert "MCP_CTX" in seen["a"] and "def add(a, b)" not in seen["a"]
 
 
@@ -572,6 +736,7 @@ def test_force_turn_dispatches_even_when_baseline_is_green():
     work = _copy_repo(FIXTURE)
     assert apply_patch(work, MULTIPLY_FIX).ok
     adapter = detect_adapter(work)
+    ctx = _trusted_context(work, adapter)
     called = []
     comment = (
         "--- a/mathx/ops.py\n+++ b/mathx/ops.py\n@@ -4,3 +4,4 @@ def multiply(a, b):\n"
@@ -586,6 +751,7 @@ def test_force_turn_dispatches_even_when_baseline_is_green():
         lambda prompt: (called.append(prompt) or comment),
         max_turns=1,
         force_turn=True,
+        verification_context=ctx,
     )
     assert res.success is True and res.turns == 1
     assert called

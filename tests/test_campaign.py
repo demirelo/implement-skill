@@ -18,6 +18,7 @@ from campaign import (
 )
 from execute import BestResult
 from review import ReviewRound
+from verification import VerificationContext
 
 
 def _profile():
@@ -27,6 +28,13 @@ def _profile():
         "credentials": {},
         "prefs": {},
     }
+
+
+def _context(tmp_path):
+    work = tmp_path / "wt"
+    work.mkdir()
+    adapter = {"name": "test-adapter"}
+    return work, VerificationContext(work, True, adapter, {}, available=["none"])
 
 
 def test_role_models_best_of_n_defaults_to_two_and_is_validated():
@@ -73,6 +81,50 @@ def test_campaign_recognizes_lean_acceptance_module_changes():
     assert campaign._has_test_change(["Tests/Upwind.lean"]) is True
     assert campaign._has_test_change(["CertifiedNumerics/GridTest.lean"]) is True
     assert campaign._has_test_change(["CertifiedNumerics/Grid.lean"]) is False
+
+
+def test_local_verification_requires_context(tmp_path):
+    with pytest.raises(CampaignError, match="VerificationContext"):
+        campaign._verify_local(tmp_path)
+
+
+def test_default_item_executor_closes_context_when_builder_fails(monkeypatch, tmp_path):
+    work = tmp_path / "wt"
+    work.mkdir()
+    seen = {}
+
+    class SpyContext:
+        def __init__(self, repo_root, *_args, **_kwargs):
+            self.repo_root = Path(repo_root).resolve()
+            self.closed = False
+            seen["context"] = self
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(campaign, "_base_for_item", lambda *a, **k: ("base", "main"))
+    monkeypatch.setattr(campaign, "_run", lambda *a, **k: "base")
+    monkeypatch.setattr(campaign, "inspect_overlaps", lambda *a, **k: [])
+    monkeypatch.setattr(campaign, "create_branch_worktree", lambda *a, **k: str(work))
+    monkeypatch.setattr(campaign, "detect_adapter", lambda *_a, **_k: {"name": "adapter"})
+    monkeypatch.setattr(campaign, "VerificationContext", SpyContext)
+    monkeypatch.setattr(campaign, "run_implement", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("builder")))
+
+    result = campaign._default_item_executor(
+        tmp_path,
+        campaign.CampaignPlan("goal", (PlanItem("x", "X", "scope", acceptance=("works",)),)),
+        RoleModels(("a",), "reviewer", best_of_n=1),
+        _profile(),
+        None,
+        {},
+        None,
+        {},
+        True,
+        {},
+        PlanItem("x", "X", "scope", acceptance=("works",)),
+    )
+    assert result.status == "failed"
+    assert seen["context"].closed is True
 
 
 def test_plan_item_threads_required_artifacts_into_builder_brief():
@@ -249,46 +301,59 @@ def test_run_campaign_rejects_unsafe_base_ref():
         )
 
 
-def test_ci_repair_routes_failed_logs_to_configured_builders(monkeypatch):
+def test_ci_repair_routes_failed_logs_to_configured_builders(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(campaign, "pr_checks", lambda *a, **k: [
         {"name": "test", "state": "FAILURE", "link": "run/1"}
     ])
     monkeypatch.setattr(campaign, "failed_check_logs", lambda *a, **k: "traceback")
-    monkeypatch.setattr(campaign, "_verify_local", lambda *_a, **_k: (None, None))
+    def fake_verify(_worktree, context):
+        seen["verify_context"] = context
+        return None, None
+    monkeypatch.setattr(campaign, "_verify_local", fake_verify)
     monkeypatch.setattr(campaign, "post_comment", lambda *a, **k: None)
 
     def fake_run_implement(_repo, brief, **kw):
         seen["brief"] = brief
         seen["builders"] = kw["builders"]
         seen["best_of_n"] = kw["best_of_n"]
+        seen["implement_context"] = kw["verification_context"]
         return BestResult(winner="a", diff="d", turns=1, applied=True)
 
     monkeypatch.setattr(campaign, "run_implement", fake_run_implement)
-    campaign._repair_ci(
-        "/wt",
-        PlanItem("x", "X", "scope"),
-        RoleModels(("a", "b"), "reviewer"),
-        _profile(),
-        {},
-        None,
-        None,
-        True,
-        7,
-        "implement/x",
-    )
+    work, context = _context(tmp_path)
+    try:
+        campaign._repair_ci(
+            work,
+            PlanItem("x", "X", "scope"),
+            RoleModels(("a", "b"), "reviewer"),
+            _profile(),
+            {},
+            None,
+            None,
+            True,
+            7,
+            "implement/x",
+            context,
+        )
+    finally:
+        context.close()
     assert "traceback" in seen["brief"]
     assert seen["builders"] == ("a", "b") and seen["best_of_n"] == 2
+    assert seen["implement_context"] is seen["verify_context"] is context
 
 
-def test_merge_conflict_repair_routes_conflicted_files_to_builders(monkeypatch):
+def test_merge_conflict_repair_routes_conflicted_files_to_builders(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(
         campaign,
         "pr_status",
         lambda *a, **k: {"mergeable": "CONFLICTING", "baseRefName": "main"},
     )
-    monkeypatch.setattr(campaign, "_verify_local", lambda *_a, **_k: (None, None))
+    def fake_verify(_worktree, context):
+        seen["verify_context"] = context
+        return None, None
+    monkeypatch.setattr(campaign, "_verify_local", fake_verify)
     monkeypatch.setattr(campaign, "post_comment", lambda *a, **k: None)
 
     def fake_local_run(argv, _repo, _runner):
@@ -309,27 +374,34 @@ def test_merge_conflict_repair_routes_conflicted_files_to_builders(monkeypatch):
     def fake_run_implement(_repo, brief, **kw):
         seen["brief"] = brief
         seen["best_of_n"] = kw["best_of_n"]
+        seen["implement_context"] = kw["verification_context"]
         return BestResult(winner="a", diff="d", turns=1, applied=True)
 
     monkeypatch.setattr(campaign, "run_implement", fake_run_implement)
-    repaired, base = campaign._repair_merge_conflict(
-        "/wt",
-        PlanItem("x", "X", "scope"),
-        RoleModels(("a", "b"), "reviewer"),
-        _profile(),
-        {},
-        MergeConflicts(),
-        None,
-        True,
-        7,
-        "implement/x",
-    )
+    work, context = _context(tmp_path)
+    try:
+        repaired, base = campaign._repair_merge_conflict(
+            work,
+            PlanItem("x", "X", "scope"),
+            RoleModels(("a", "b"), "reviewer"),
+            _profile(),
+            {},
+            MergeConflicts(),
+            None,
+            True,
+            7,
+            "implement/x",
+            context,
+        )
+    finally:
+        context.close()
     assert repaired is True and base == "origin/main"
     assert "src/conflicted.py" in seen["brief"]
     assert seen["best_of_n"] == 2
+    assert seen["implement_context"] is seen["verify_context"] is context
 
 
-def test_review_feedback_is_validated_then_routed_to_builders(monkeypatch):
+def test_review_feedback_is_validated_then_routed_to_builders(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(campaign, "pr_feedback", lambda *a, **k: {
         "reviews": [{"id": "r1", "state": "CHANGES_REQUESTED", "body": "fix auth",
@@ -337,7 +409,10 @@ def test_review_feedback_is_validated_then_routed_to_builders(monkeypatch):
         "comments": [],
     })
     monkeypatch.setattr(campaign, "_run", lambda *a, **k: "DIFF")
-    monkeypatch.setattr(campaign, "_verify_local", lambda *_a, **_k: (None, None))
+    def fake_verify(_worktree, context):
+        seen["verify_context"] = context
+        return None, None
+    monkeypatch.setattr(campaign, "_verify_local", fake_verify)
     monkeypatch.setattr(campaign, "post_comment", lambda *a, **k: None)
     monkeypatch.setattr(
         campaign,
@@ -348,6 +423,7 @@ def test_review_feedback_is_validated_then_routed_to_builders(monkeypatch):
 
     def fake_run_implement(_repo, brief, **kw):
         seen["brief"] = brief
+        seen["implement_context"] = kw["verification_context"]
         return BestResult(winner="a", diff="d", turns=1, applied=True)
 
     monkeypatch.setattr(campaign, "run_implement", fake_run_implement)
@@ -357,45 +433,95 @@ def test_review_feedback_is_validated_then_routed_to_builders(monkeypatch):
             '"body": "confirmed", "file": "auth.py", "line": 2, '
             '"objective": true, "severity": "major", "verifiable": true}]}'
         )
-    changed, seen_ids, final = campaign._repair_review_feedback(
-        "/wt",
-        PlanItem("x", "X", "scope", acceptance=("auth works",)),
-        RoleModels(("a", "b"), "reviewer"),
-        _profile(),
-        reviewer,
-        {},
-        None,
-        None,
-        True,
-        7,
-        "implement/x",
-        "base",
-        set(),
-    )
+    work, context = _context(tmp_path)
+    try:
+        changed, seen_ids, final = campaign._repair_review_feedback(
+            work,
+            PlanItem("x", "X", "scope", acceptance=("auth works",)),
+            RoleModels(("a", "b"), "reviewer"),
+            _profile(),
+            reviewer,
+            {},
+            None,
+            None,
+            True,
+            7,
+            "implement/x",
+            "base",
+            set(),
+            context,
+        )
+    finally:
+        context.close()
     assert changed is True and "r1" in seen_ids and final.decision == "accept"
     assert "auth regression" in seen["brief"] and seen["pushed"] is True
+    assert seen["implement_context"] is seen["verify_context"] is context
 
 
-def test_final_reviewer_invalid_output_retries_before_handoff(monkeypatch):
+def test_final_reviewer_invalid_output_retries_before_handoff(monkeypatch, tmp_path):
     monkeypatch.setattr(campaign, "_review_diff", lambda *a, **k: "DIFF")
     replies = iter([
         "not json",
         "still not json",
         '{"approved": true, "findings": []}',
     ])
-    rr = campaign._final_review_loop(
-        "/wt",
-        PlanItem("x", "X", "scope", acceptance=("works",)),
-        RoleModels(("a", "b"), "reviewer"),
-        _profile(),
-        lambda _prompt: next(replies),
-        {},
-        None,
-        None,
-        True,
-        "base",
-    )
+    work, context = _context(tmp_path)
+    try:
+        rr = campaign._final_review_loop(
+            work,
+            PlanItem("x", "X", "scope", acceptance=("works",)),
+            RoleModels(("a", "b"), "reviewer"),
+            _profile(),
+            lambda _prompt: next(replies),
+            {},
+            None,
+            None,
+            True,
+            "base",
+            context,
+        )
+    finally:
+        context.close()
     assert rr.decision == "accept" and not rr.escalated
+
+
+def test_final_review_repair_reuses_verification_context(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(campaign, "_review_diff", lambda *a, **k: "DIFF")
+    monkeypatch.setattr(campaign, "_verify_local",
+                        lambda _worktree, context: seen.setdefault("verify", context))
+    monkeypatch.setattr(
+        campaign,
+        "run_implement",
+        lambda _repo, _brief, **kw: (
+            seen.setdefault("implement", kw["verification_context"]),
+            BestResult(winner="a", diff="d", turns=1, applied=True),
+        )[1],
+    )
+    replies = iter([
+        '{"approved": false, "findings": [{"title": "fix", "objective": true, '
+        '"severity": "major", "verifiable": true}]}',
+        '{"approved": true, "findings": []}',
+    ])
+    work, context = _context(tmp_path)
+    try:
+        result = campaign._final_review_loop(
+            work,
+            PlanItem("x", "X", "scope", acceptance=("works",)),
+            RoleModels(("a", "b"), "reviewer"),
+            _profile(),
+            lambda _prompt: next(replies),
+            {},
+            None,
+            None,
+            True,
+            "base",
+            context,
+        )
+    finally:
+        context.close()
+    assert result.decision == "accept"
+    assert seen["implement"] is seen["verify"] is context
 
 
 def _rows(**live):
