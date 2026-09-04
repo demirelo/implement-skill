@@ -117,6 +117,37 @@ def test_finalize_zero_acceptance_is_not_green():
     assert res.tier == "red" and res.merged is False   # 0/0 acceptance is a false green (H5-class)
 
 
+def test_finalize_cannot_merge_when_criterion_evidence_is_missing():
+    fake = FakeRun()
+    art = _artifacts(acceptance_k=2, acceptance_n=2,
+                     acceptance_evidence={"C1": True, "C2": None})
+    ref = open_draft("/repo", art, sign=False, runner=fake)
+    fake.calls.clear()
+    result = finalize("/repo", ref, art, runner=fake)
+    assert result.tier == "yellow" and result.merged is False
+    assert ["pr", "merge"] not in _gh_verbs(fake)
+    edit_stdin = [stdin for argv, stdin in fake.calls if argv[:3] == ["gh", "pr", "edit"]][0]
+    assert "C1" in edit_stdin and "green" in edit_stdin
+    assert "C2" in edit_stdin and "cannot-verify" in edit_stdin
+
+    art = _artifacts(acceptance_k=1, acceptance_n=1,
+                     acceptance_evidence={"WRONG-ID": True}, acceptance_ids=("C1",))
+    result = finalize("/repo", ref, art, runner=fake)
+    assert result.tier == "yellow" and result.merged is False
+
+
+def test_finalize_failing_criterion_evidence_is_red():
+    fake = FakeRun()
+    art = _artifacts(acceptance_k=1, acceptance_n=2,
+                     acceptance_evidence={"C1": True, "C2": False},
+                     acceptance_ids=("C1", "C2"))
+    ref = open_draft("/repo", art, sign=False, runner=fake)
+    fake.calls.clear()
+    result = finalize("/repo", ref, art, runner=fake)
+    assert result.tier == "red" and result.merged is False
+    assert ["pr", "merge"] not in _gh_verbs(fake)
+
+
 def _gh_verbs(fake):
     return [argv[1:3] for argv, _ in fake.calls if argv[0] == "gh"]
 

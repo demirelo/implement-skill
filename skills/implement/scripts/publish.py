@@ -32,6 +32,10 @@ class RunArtifacts:
     review: object
     regate_passed: bool
     trace: object = None   # execute.decision_trace output; rendered into the body, scrubbed on the way out
+    # Criterion-id -> True/False/None.  None means the criterion could not be verified and is never
+    # promoted to a green tier.  Kept optional for callers that predate criterion-linked plans.
+    acceptance_evidence: dict | None = None
+    acceptance_ids: tuple[str, ...] = ()
 
 
 def _secrets(secrets):
@@ -52,12 +56,27 @@ def finalize(repo, pr, artifacts, *, autonomy="auto-merge", merge_method="squash
              assignee=None, secrets=None, runner=subprocess.run) -> Handoff:
     sec = _secrets(secrets)
     # 0/0 acceptance is a false green (same class as the H5 re_gate guard) — never tier it green
-    acceptance_green = artifacts.acceptance_n > 0 and artifacts.acceptance_k >= artifacts.acceptance_n
+    evidence = artifacts.acceptance_evidence
+    if evidence is not None:
+        # A complete map is required: omitted ids are cannot-verify, even if the legacy integer
+        # fields happen to contain a matching K/N.
+        acceptance_green = (
+            artifacts.acceptance_n > 0
+            and len(evidence) == artifacts.acceptance_n
+            and (not artifacts.acceptance_ids
+                 or set(evidence) == set(artifacts.acceptance_ids))
+            and all(value is True for value in evidence.values())
+        )
+    else:
+        acceptance_green = artifacts.acceptance_n > 0 and artifacts.acceptance_k >= artifacts.acceptance_n
     label = tier(acceptance_green=acceptance_green,
-                 regate_passed=artifacts.regate_passed, review=artifacts.review)
+                 regate_passed=artifacts.regate_passed, review=artifacts.review,
+                 acceptance_evidence=evidence, acceptance_ids=artifacts.acceptance_ids)
     body = scrub(render_pr_body(goal=artifacts.goal, consensus_notes=artifacts.consensus_notes,
                                 acceptance_k=artifacts.acceptance_k, acceptance_n=artifacts.acceptance_n,
-                                review=artifacts.review, tier_label=label, trace=artifacts.trace), sec)
+                                review=artifacts.review, tier_label=label, trace=artifacts.trace,
+                                acceptance_evidence=evidence,
+                                acceptance_ids=artifacts.acceptance_ids), sec)
     update_body(repo, pr, body, runner=runner)
     post_comment(repo, pr, scrub(render_review_comment(artifacts.review), sec), runner=runner)
     mark_ready(repo, pr, runner=runner)

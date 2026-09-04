@@ -17,6 +17,7 @@ from campaign import (
     run_campaign,
 )
 from execute import BestResult
+from oracle import AcceptanceCriterion, AuthoredTest, protect_oracle
 from review import ReviewRound
 from verification import VerificationContext
 
@@ -140,6 +141,196 @@ def test_plan_item_threads_required_artifacts_into_builder_brief():
     assert "- specs/SOURCE-MAP.md" in brief
 
 
+def test_plan_item_parses_criterion_ids_and_executable_oracles():
+    item = PlanItem.from_mapping({
+        "id": "boundary",
+        "title": "Boundary",
+        "acceptance": [
+            {"id": "VERIFY-1", "statement": "writes stay in the candidate",
+             "oracle_path": "tests/test_boundary.py"},
+            {"id": "VERIFY-2", "statement": "Lean proof elaborates",
+             "oracle_path": "Tests/Boundary.lean",
+             "oracle_command": "lake env lean Tests/Boundary.lean"},
+        ],
+    })
+    assert [x.id for x in item.criteria] == ["VERIFY-1", "VERIFY-2"]
+    assert item.acceptance == ("writes stay in the candidate", "Lean proof elaborates")
+    assert item.oracle_paths == ("tests/test_boundary.py", "Tests/Boundary.lean")
+
+
+def test_authored_oracle_must_match_each_referenced_criterion_path():
+    criteria = (
+        AcceptanceCriterion("C1", "the first criterion", ("tests/test_real.py",), ""),
+    )
+    decoy = AuthoredTest(
+        "item", "tests/test_decoy.py", "def test_decoy():\n    assert False\n", ("C1",)
+    )
+    with pytest.raises(CampaignError, match="not declared by criterion"):
+        campaign._validate_authored_oracle_relations(criteria, (decoy,))
+    with pytest.raises(CampaignError, match="not declared by criterion"):
+        run_campaign(
+            "/repo",
+            {"items": [{
+                "id": "item", "title": "Item",
+                "acceptance": [{"id": "C1", "statement": "the first criterion",
+                                "oracle_path": "tests/test_real.py"}],
+                "oracle_tests": [{"path": decoy.path, "body": decoy.body,
+                                  "criteria_refs": ["C1"]}],
+            }]},
+            builders=["a"], reviewer="reviewer", profile=_profile(),
+            item_executor=lambda *_: None,
+        )
+
+
+def test_campaign_rejects_structured_criterion_without_executable_oracle():
+    with pytest.raises(CampaignError, match="executable oracle"):
+        run_campaign(
+            "/repo",
+            {"items": [{"id": "a", "title": "A", "touched_areas": ["a"],
+                        "acceptance": [{"id": "C1", "statement": "must be checked"}]}]},
+            builders=["a"], reviewer="reviewer", profile=_profile(),
+            item_executor=lambda *_: None,
+        )
+
+
+def test_campaign_rejects_command_oracle_without_declared_paths():
+    with pytest.raises(CampaignError, match="oracle_command requires oracle_paths"):
+        run_campaign(
+            "/repo",
+            {"items": [{"id": "a", "title": "A", "touched_areas": ["a"],
+                        "acceptance": [{"id": "C1", "statement": "must be checked",
+                                        "oracle_command": "pytest tests/test_a.py -q"}]}]},
+            builders=["a"], reviewer="reviewer", profile=_profile(),
+            item_executor=lambda *_: None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "builder_expected", "error_fragment"),
+    [(1, "1 failed\n", True, "builder stopped"),
+     (0, "1 passed\n", False, "not valid RED evidence")],
+)
+def test_command_oracle_is_checked_on_base_before_builder_dispatch(
+    monkeypatch, tmp_path, returncode, stdout, builder_expected, error_fragment
+):
+    repo = tmp_path / "repo"
+    work = tmp_path / "work"
+    (work / "tests").mkdir(parents=True)
+    (work / "tests" / "test_command.py").write_text(
+        "def test_command():\n    assert expected() == 1\n"
+    )
+    adapter = {"test_one": "pytest {path} -q", "test_cmd": "pytest -q", "timeout": 10}
+    command_calls = []
+    builder_called = False
+
+    class Proc:
+        pass
+
+    def runner(argv, **_kwargs):
+        command_calls.append(argv)
+        proc = Proc()
+        proc.returncode = returncode
+        proc.stdout = stdout
+        proc.stderr = ""
+        return proc
+
+    def fake_builder(*_args, **_kwargs):
+        nonlocal builder_called
+        builder_called = True
+        raise RuntimeError("builder stopped")
+
+    monkeypatch.setattr(campaign, "_base_for_item", lambda *a, **k: ("base", "main"))
+    monkeypatch.setattr(campaign, "_run", lambda *a, **k: "base")
+    monkeypatch.setattr(campaign, "inspect_overlaps", lambda *a, **k: [])
+    monkeypatch.setattr(campaign, "create_branch_worktree", lambda *a, **k: str(work))
+    monkeypatch.setattr(campaign, "detect_adapter", lambda *_a, **_k: adapter)
+    monkeypatch.setattr(campaign, "available_backends", lambda runner=None: ["none"])
+    monkeypatch.setattr(campaign, "run_implement", fake_builder)
+    item = PlanItem.from_mapping({
+        "id": "item", "title": "Item",
+        "acceptance": [{"id": "CMD-1", "statement": "command fails on base",
+                        "oracle_path": "tests/test_command.py",
+                        "oracle_command": "pytest tests/test_command.py -q"}],
+    })
+    result = campaign._default_item_executor(
+        repo, campaign.CampaignPlan("goal", (item,)),
+        RoleModels(("a",), "reviewer", best_of_n=1), _profile(), None, {},
+        runner, {}, True, {}, item,
+    )
+    assert result.status == "failed" and error_fragment in result.error
+    assert command_calls == [["pytest", "tests/test_command.py", "-q"]]
+    assert builder_called is builder_expected
+
+
+def test_campaign_rejects_legacy_criterion_before_green_autonomy():
+    with pytest.raises(CampaignError, match="executable oracle"):
+        run_campaign(
+            "/repo",
+            {"items": [{"id": "a", "title": "A", "touched_areas": ["a"],
+                        "acceptance": ["legacy prose"]}]},
+            builders=["a"], reviewer="reviewer", profile=_profile(),
+            item_executor=lambda *_: None,
+        )
+
+
+def test_campaign_rejects_unsafe_criterion_command_before_dispatch():
+    with pytest.raises(CampaignError, match="oracle command denied"):
+        run_campaign(
+            "/repo",
+            {"items": [{"id": "a", "title": "A", "touched_areas": ["a"],
+                        "acceptance": [{"id": "C1", "statement": "must be checked",
+                                        "oracle_path": "tests/test_a.py",
+                                        "oracle_command": "rm -rf tests/test_a.py"}]}]},
+            builders=["a"], reviewer="reviewer", profile=_profile(),
+            item_executor=lambda *_: None,
+        )
+
+
+def test_campaign_ci_repair_restores_oracle_before_gate(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "pyproject.toml").write_text("[project]\nname='oracle'\nversion='0'\n")
+    oracle_path = repo / "tests" / "test_oracle.py"
+    oracle_path.write_text("def test_oracle():\n    assert expected() == 1\n")
+    original = oracle_path.read_text()
+    snapshot = protect_oracle(repo, ("tests/test_oracle.py",))
+    oracle_path.write_text("def test_oracle():\n    assert True\n")
+    adapter = campaign.detect_adapter(repo)
+    seen = []
+    dispatch_seen = []
+
+    class GreenGate:
+        returncode = 0
+        stdout = "1 passed\n"
+        stderr = ""
+
+    def runner(argv, **kwargs):
+        seen.append(oracle_path.read_text())
+        return GreenGate()
+
+    monkeypatch.setattr(campaign, "pr_checks", lambda *a, **k: [
+        {"name": "test", "state": "FAILURE", "link": "run/1"}
+    ])
+    monkeypatch.setattr(campaign, "failed_check_logs", lambda *a, **k: "traceback")
+    def fake_run_implement(*_args, **_kwargs):
+        dispatch_seen.append(oracle_path.read_text())
+        return BestResult(winner="a", diff="d", turns=1, applied=True)
+
+    monkeypatch.setattr(campaign, "run_implement", fake_run_implement)
+    monkeypatch.setattr(campaign, "post_comment", lambda *a, **k: None)
+    context = VerificationContext(repo, True, adapter, {}, available=["none"], runner=runner)
+    try:
+        campaign._repair_ci(
+            repo, PlanItem("x", "X", "scope"), RoleModels(("a",), "reviewer", 1),
+            _profile(), {}, runner, {}, True, 7, "implement/x", context, snapshot,
+            ("tests/test_oracle.py",),
+        )
+    finally:
+        context.close()
+    assert dispatch_seen == [original]
+    assert seen == [original]
+
+
 def test_review_diff_and_changed_files_include_untracked_artifacts(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     (tmp_path / "tracked.txt").write_text("base\n")
@@ -178,10 +369,12 @@ def test_run_campaign_defaults_to_parallel_and_threads_best_of_n():
         "/repo",
         {
             "items": [
-                {"id": "a", "title": "A", "touched_areas": ["src/a"], "acceptance": ["a"]},
-                {"id": "b", "title": "B", "touched_areas": ["src/b"], "acceptance": ["b"]},
+                {"id": "a", "title": "A", "touched_areas": ["src/a"],
+                 "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}]},
+                {"id": "b", "title": "B", "touched_areas": ["src/b"],
+                 "acceptance": [{"id": "B-1", "statement": "b", "oracle_path": "tests/test_b.py"}]},
                 {"id": "c", "title": "C", "deps": ["a"], "touched_areas": ["src/c"],
-                 "acceptance": ["c"]},
+                 "acceptance": [{"id": "C-1", "statement": "c", "oracle_path": "tests/test_c.py"}]},
             ]
         },
         builders=["a", "b"],
@@ -205,7 +398,8 @@ def test_run_campaign_accepts_single_model_config_mapping():
     run_campaign(
         "/repo",
         {"items": [
-            {"id": "a", "title": "A", "touched_areas": ["a"], "acceptance": ["a"]}
+            {"id": "a", "title": "A", "touched_areas": ["a"],
+             "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}]}
         ]},
         models={"builders": ["a", "b", "c"], "reviewer": "reviewer", "best_of_n": 3},
         profile=_profile(),
@@ -226,8 +420,10 @@ def test_run_campaign_allows_explicit_serial_override():
     run_campaign(
         "/repo",
         {"items": [
-            {"id": "a", "title": "A", "touched_areas": ["a"], "acceptance": ["a"]},
-            {"id": "b", "title": "B", "touched_areas": ["b"], "acceptance": ["b"]},
+            {"id": "a", "title": "A", "touched_areas": ["a"],
+             "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}]},
+            {"id": "b", "title": "B", "touched_areas": ["b"],
+             "acceptance": [{"id": "B-1", "statement": "b", "oracle_path": "tests/test_b.py"}]},
         ]},
         builders=["a", "b"],
         reviewer="reviewer",
@@ -245,9 +441,10 @@ def test_run_campaign_blocks_dependents_after_failure():
     result = run_campaign(
         "/repo",
         {"items": [
-            {"id": "a", "title": "A", "touched_areas": ["a"], "acceptance": ["a"]},
+            {"id": "a", "title": "A", "touched_areas": ["a"],
+             "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}]},
             {"id": "b", "title": "B", "deps": ["a"], "touched_areas": ["b"],
-             "acceptance": ["b"]},
+             "acceptance": [{"id": "B-1", "statement": "b", "oracle_path": "tests/test_b.py"}]},
         ]},
         builders=["a", "b"],
         reviewer="reviewer",
@@ -264,9 +461,9 @@ def test_run_campaign_rejects_dependency_cycles():
             "/repo",
             {"items": [
                 {"id": "a", "title": "A", "deps": ["b"], "touched_areas": ["a"],
-                 "acceptance": ["a"]},
+                 "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}]},
                 {"id": "b", "title": "B", "deps": ["a"], "touched_areas": ["b"],
-                 "acceptance": ["b"]},
+                 "acceptance": [{"id": "B-1", "statement": "b", "oracle_path": "tests/test_b.py"}]},
             ]},
             builders=["a", "b"],
             reviewer="reviewer",
@@ -292,7 +489,8 @@ def test_run_campaign_rejects_unsafe_base_ref():
         run_campaign(
             "/repo",
             {"base": "--upload-pack=evil", "items": [
-                {"id": "a", "title": "A", "touched_areas": ["a"], "acceptance": ["a"]}
+                {"id": "a", "title": "A", "touched_areas": ["a"],
+                 "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}]}
             ]},
             builders=["a", "b"],
             reviewer="reviewer",

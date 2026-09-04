@@ -49,7 +49,8 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
                   ledger_path=None, builders=None, dispatcher_overrides=None,
                   force_turn=False, repo_ctx=None, best_of_n=None,
                   required_paths=(), required_paths_must_change=True, strict=False,
-                  verification_context=None, verification_runner=subprocess.run):
+                  verification_context=None, verification_runner=subprocess.run,
+                  protected_oracle_paths=()):
     if profile is None:
         profile = load_profile(start=start, home=home) or default_profile(_MODELS, _PROVIDERS)
     dispatcher_overrides = dispatcher_overrides or {}
@@ -186,6 +187,7 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
             required_paths=required_paths,
             required_paths_must_change=required_paths_must_change,
             verification_context=verification_context,
+            protected_oracle_paths=protected_oracle_paths,
         )
         best.unavailable = tuple(unavailable_builders)   # dropped-at-preflight Builders → surfaced in the PR
         outcomes.log_run(best, bucket, list(dispatchers), path=ledger_path)   # learn from this run

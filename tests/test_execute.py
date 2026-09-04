@@ -3,6 +3,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
 from gate import detect_adapter, run_gate
 from execute import run_inner_loop, _copy_repo
+from oracle import AuthoredTest, check_red, protect_oracle
 from verification import VerificationContext
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
@@ -10,6 +11,43 @@ FIXTURE = Path(__file__).parent / "fixtures" / "sample_py_repo"
 
 def _trusted_context(repo, adapter):
     return VerificationContext(repo, True, adapter, {}, available=["none"])
+
+
+class _OracleAwareRunner:
+    """Small deterministic gate runner for boundary tests; it never executes candidate code."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, **kwargs):
+        root = Path(kwargs["cwd"])
+        oracle = (root / "tests" / "test_ops.py").read_text()
+        self.calls.append(oracle)
+        green = "def multiply" in (root / "mathx" / "ops.py").read_text()
+
+        class Proc:
+            returncode = 0 if green else 1
+            stdout = "2 passed\n" if green else "FAILED tests/test_ops.py::test_multiply - missing\n1 passed, 1 failed\n"
+            stderr = ""
+
+        return Proc()
+
+
+class _RedGreenRunner:
+    """Deterministic Python adapter seam for RED-to-green without running model code."""
+
+    def __call__(self, _argv, **kwargs):
+        root = Path(kwargs["cwd"])
+        green = "def multiply" in (root / "mathx" / "ops.py").read_text()
+
+        class Proc:
+            returncode = 0 if green else 1
+            stdout = ("2 passed\n" if green else
+                      "FAILED tests/test_multiply_oracle.py::test_multiply_oracle - missing\n"
+                      "1 passed, 1 failed\n")
+            stderr = ""
+
+        return Proc()
 
 MULTIPLY_FIX = (
     "--- a/mathx/ops.py\n"
@@ -58,6 +96,88 @@ def test_inner_loop_reaches_green_in_one_turn():
     assert result.success is True
     assert result.turns == 1
     assert "def add(a, b)" in seen[0]  # the OW model is shown the repo source
+
+
+def test_python_oracle_red_then_inner_loop_green_without_hostile_execution():
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    runner = _RedGreenRunner()
+    context = VerificationContext(work, True, adapter, {}, available=["none"], runner=runner)
+    oracle = AuthoredTest(
+        "s1", "tests/test_multiply_oracle.py",
+        "from mathx import ops\n\n\n"
+        "def test_multiply_oracle():\n"
+        "    assert ops.multiply(4, 5) == 20\n",
+        ("VERIFY-1",),
+    )
+    red = check_red(oracle, work, adapter, context)
+    assert red.is_red and red.well_formed and red.collected > 0
+    snapshot = protect_oracle(work, (oracle.path,))
+    result = run_inner_loop(
+        work, "implement multiply", adapter,
+        lambda _prompt: MULTIPLY_FIX,
+        max_turns=1, verification_context=context, oracle_snapshot=snapshot,
+    )
+    assert result.success and (Path(work) / "mathx" / "ops.py").read_text().endswith(
+        "def multiply(a, b):\n    return a * b\n"
+    )
+    context.close()
+
+
+def test_protected_oracle_rejects_assert_true_tamper_before_execution(tmp_path):
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    runner = _OracleAwareRunner()
+    context = VerificationContext(work, True, adapter, {}, available=["none"], runner=runner)
+    snapshot = protect_oracle(work, ("tests/test_ops.py",))
+    tamper = ("--- a/tests/test_ops.py\n+++ b/tests/test_ops.py\n"
+              "@@ -1 +1 @@\n-import\n+assert True\n")
+    result = run_inner_loop(
+        work, "tamper", adapter, lambda _prompt: tamper, max_turns=1,
+        verification_context=context, oracle_snapshot=snapshot,
+    )
+    assert result.success is False
+    assert "protected acceptance oracle" in result.ledger[0]
+    assert runner.calls == [snapshot.files["tests/test_ops.py"]]
+    context.close()
+
+
+def test_command_oracle_target_assert_true_tamper_is_rejected_before_apply():
+    from execute import run_best_of_n
+
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    runner = _OracleAwareRunner()
+    context = VerificationContext(work, True, adapter, {}, available=["none"], runner=runner)
+    command_target = "tests/test_ops.py"
+    tamper = (
+        "--- a/tests/test_ops.py\n+++ b/tests/test_ops.py\n"
+        "@@ -1 +1 @@\n-import\n+assert True\n"
+    )
+    result = run_best_of_n(
+        work, "tamper command oracle", adapter, {"builder": lambda _prompt: tamper},
+        max_turns=1, verification_context=context,
+        protected_oracle_paths=(command_target,),
+    )
+    assert result.applied is False and result.winner == ""
+    assert all(content == (Path(work) / command_target).read_text() for content in runner.calls)
+    context.close()
+
+
+def test_protected_oracle_is_restored_before_scoped_and_full_gates(tmp_path):
+    work = _copy_repo(FIXTURE)
+    adapter = detect_adapter(work)
+    runner = _OracleAwareRunner()
+    context = VerificationContext(work, True, adapter, {}, available=["none"], runner=runner)
+    snapshot = protect_oracle(work, ("tests/test_ops.py",))
+    result = run_inner_loop(
+        work, "add multiply", adapter, lambda _prompt: MULTIPLY_FIX, max_turns=1,
+        verification_context=context, oracle_snapshot=snapshot,
+    )
+    assert result.success is True
+    assert len(runner.calls) == 3  # baseline, scoped target, and final full confirmation
+    assert len(set(runner.calls)) == 1
+    context.close()
 
 
 def test_inner_loop_refuses_vacuous_green(tmp_path):
