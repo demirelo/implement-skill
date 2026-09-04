@@ -175,6 +175,10 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
                                          panel_context=panel_context, repo_ctx=repo_ctx))
         applied = apply_patch(repo_path, diff)
         if not applied.ok:
+            # A rejected patch may have left tracked or untracked candidate changes behind
+            # (especially when the structured fallback encountered a later bad hunk). Restore
+            # the candidate baseline before asking the Builder for another turn.
+            _reset(repo_path)
             ledger.append(scrub(f"turn {turn}: patch did not apply ({applied.error[:120]})", secrets))
             turns_log.append({"failing": list(failing), "applied": False,
                               "denied": True, "green_delta": 0})
