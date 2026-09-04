@@ -50,7 +50,7 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
                   force_turn=False, repo_ctx=None, best_of_n=None,
                   required_paths=(), required_paths_must_change=True, strict=False,
                   verification_context=None, verification_runner=subprocess.run,
-                  protected_oracle_paths=()):
+                  protected_oracle_paths=(), worker_context=None):
     if profile is None:
         profile = load_profile(start=start, home=home) or default_profile(_MODELS, _PROVIDERS)
     dispatcher_overrides = dispatcher_overrides or {}
@@ -200,11 +200,21 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
                         continue
         if not dispatchers:
             raise RuntimeError("no live Builder in the panel — run the implement setup wizard")
-        # panel continuity: when a panel exists for this repo, each Builder gets its packed slice
-        # (brief + invariants + ITS OWN ledger) and the run outcome is recorded back — Builders feel
-        # stateful across related work. No panel -> byte-identical stateless prompts, nothing spawned.
+        # Campaign workers receive a bounded canonical projection.  It deliberately takes
+        # precedence over the historical continuity panel: event-log tails and inherited
+        # transcripts are audit/on-demand material, never normal worker context.  Standalone
+        # run_implement calls retain the panel-continuity behavior for backwards compatibility.
         panel_ctx = None
-        if continuity.exists(repo_path, home=home):
+        legacy_panel_active = False
+        if worker_context is not None:
+            try:
+                encoded = json.dumps(worker_context, sort_keys=True, separators=(",", ":"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("worker_context must be JSON serializable") from exc
+            panel_ctx = {m: "## Canonical item state (bounded worker projection)\n" + encoded
+                         for m in dispatchers}
+        elif continuity.exists(repo_path, home=home):
+            legacy_panel_active = True
             panel_ctx = {m: continuity.pack(repo_path, m, home=home) for m in dispatchers}
         best = run_best_of_n(
             repo_path,
@@ -223,7 +233,7 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
         )
         best.unavailable = tuple(unavailable_builders)   # dropped-at-preflight Builders → surfaced in the PR
         outcomes.log_run(best, bucket, list(dispatchers), path=ledger_path)   # learn from this run
-        if panel_ctx is not None:
+        if legacy_panel_active:
             continuity.record_run(repo_path, best, bucket, list(dispatchers), home=home)
         return best
     finally:

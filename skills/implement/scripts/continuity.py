@@ -53,6 +53,26 @@ def exists(repo_path, home=None) -> bool:
     return (panel_dir(repo_path, home) / "events.jsonl").exists()
 
 
+def canonical_state_path(repo_path, home=None) -> Path:
+    """Return the manager-owned canonical campaign state path.
+
+    The event log remains the continuity/audit surface.  Importing lazily keeps this module usable
+    by the legacy panel CLI and avoids making campaign-state depend on continuity at import time.
+    """
+    from campaign_state import state_path
+    return state_path(repo_path, home)
+
+
+def canonical_state_exists(repo_path, home=None) -> bool:
+    return canonical_state_path(repo_path, home).is_file()
+
+
+def worker_projection(repo_path, item_id, *, home=None) -> dict:
+    """Read a bounded canonical projection; never packs events or provider ledgers."""
+    from campaign_state import project_worker_context
+    return project_worker_context(canonical_state_path(repo_path, home), item_id)
+
+
 def _scrub_strings(obj, secrets):
     if isinstance(obj, str):
         return scrub(obj, secrets)
@@ -251,8 +271,10 @@ def status(repo_path, home=None) -> dict:
     if pd.exists():
         for f in sorted(pd.glob("*.md")):
             ledgers[f.stem] = len(f.read_text().splitlines())
+    canonical = d / "campaign-state.json"
     return {"slug": repo_slug(repo_path), "dir": str(d), "exists": exists(repo_path, home),
-            "events": counts, "ledgers": ledgers}
+            "events": counts, "ledgers": ledgers,
+            "canonical_state": {"path": str(canonical), "exists": canonical.is_file()}}
 
 
 def main(argv=None) -> int:
