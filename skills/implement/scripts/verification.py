@@ -359,6 +359,20 @@ class VerificationContext:
     # fact that this is an argv boundary remains visible at call sites.
     run = run_argv
 
+    def run_full_gate(self, adapter=None, *, repo_root=None):
+        """Run the complete gate for a final/publication confirmation.
+
+        This intentionally has no ``only`` parameter.  Scoped ``run_gate(only=...)`` remains
+        available for fast Builder iterations, while callers at the acceptance boundary have no
+        API through which they can accidentally submit a partial gate.
+        """
+        self._ensure_open()
+        if adapter is None and repo_root is None:
+            # Keep the compatibility seam used by offline runners that replace ``run_gate`` with
+            # a narrow ``(*, only=None)`` spy; the full API still makes the unscoped choice here.
+            return self.run_gate(only=None)
+        return self.run_gate(adapter=adapter, only=None, repo_root=repo_root)
+
     def run_gate(self, adapter=None, *, only=None, repo_root=None):
         self._ensure_open()
         # Older internal callers passed a repository path positionally.  Accept that shape only

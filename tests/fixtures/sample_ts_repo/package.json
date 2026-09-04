@@ -1,0 +1,13 @@
+{
+  "name": "sample-vitest-conformance",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --reporter=dot --no-color"
+  },
+  "devDependencies": {
+    "eslint": "9.22.0",
+    "typescript": "5.8.3",
+    "vitest": "3.2.7"
+  }
+}

@@ -3,7 +3,7 @@ name: CI
 # Runs the exact checks the README documents under "Testing":
 #   python3 -m pytest -q
 #   ruff check . && mypy skills/implement/scripts
-# All offline — no network, no live models, no repo dependencies (only pytest/ruff/mypy tooling).
+# Dependency preparation is explicit and pinned; gate commands never install dependencies.
 
 on:
   push:
@@ -29,7 +29,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install tooling
-        run: python -m pip install --upgrade pip -r requirements-ci.txt
+        run: python -m pip install --disable-pip-version-check -r requirements-ci.txt
 
       - name: Lint (ruff)
         run: ruff check .
@@ -39,3 +39,121 @@ jobs:
 
       - name: Test (pytest)
         run: python -m pytest -q
+
+      - name: Python adapter red/green conformance
+        run: python -m pytest -q tests/test_gate.py -k real_python_gate_has_red_and_green_evidence
+
+  typescript-vitest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22.14.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+          cache-dependency-path: tests/fixtures/sample_ts_repo/package-lock.json
+
+      - name: Prepare pinned dependencies (explicit network step)
+        working-directory: tests/fixtures/sample_ts_repo
+        run: npm ci --ignore-scripts
+
+      - name: Set up Python 3.11 for the gate harness
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Adapter gate conformance (TypeScript green)
+        working-directory: tests/fixtures/sample_ts_repo
+        run: |
+          PYTHONPATH=../../../skills/implement/scripts python - <<'PY'
+          from pathlib import Path
+
+          from gate import detect_adapter, run_gate
+
+          repo = Path.cwd()
+          result = run_gate(repo, detect_adapter(repo))
+          for name, phase in result.phase_results.items():
+              print(f"{name}: {'PASS' if phase.passed else 'FAIL'}")
+              if not phase.passed:
+                  print(phase.evidence)
+          if not result.passed:
+              raise SystemExit(f"TypeScript adapter gate failed: {result.summary}")
+          PY
+
+      - name: Adapter gate conformance (TypeScript expected red)
+        working-directory: tests/fixtures/sample_ts_repo
+        run: |
+          PYTHONPATH=../../../skills/implement/scripts python - <<'PY'
+          from pathlib import Path
+
+          from gate import detect_adapter, run_gate
+
+          repo = Path.cwd()
+          adapter = dict(detect_adapter(repo))
+          adapter["test_cmd"] = (
+              "npm exec --no -- vitest run --config vitest.red.config.ts "
+              "--reporter=dot --no-color"
+          )
+          result = run_gate(repo, adapter)
+          for name, phase in result.phase_results.items():
+              print(f"{name}: {'PASS' if phase.passed else 'FAIL'}")
+              print(phase.evidence)
+          test_phase = result.phase_results.get("test")
+          if result.passed or test_phase is None or test_phase.passed:
+              raise SystemExit("the deliberately broken Vitest oracle unexpectedly passed")
+          PY
+
+  lean-lake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare pinned Lean 4.33.1 toolchain (explicit preparation)
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: tests/fixtures/sample_lean_repo
+
+      - name: Set up Python 3.11 for the gate harness
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Adapter gate conformance (Lean green)
+        working-directory: tests/fixtures/sample_lean_repo
+        run: |
+          PYTHONPATH=../../../skills/implement/scripts python - <<'PY'
+          from pathlib import Path
+
+          from gate import detect_adapter, run_gate
+
+          repo = Path.cwd()
+          result = run_gate(repo, detect_adapter(repo))
+          for name, phase in result.phase_results.items():
+              print(f"{name}: {'PASS' if phase.passed else 'FAIL'}")
+              if not phase.passed:
+                  print(phase.evidence)
+          if not result.passed:
+              raise SystemExit(f"Lean adapter gate failed: {result.summary}")
+          PY
+
+      - name: Adapter gate conformance (Lean expected red)
+        working-directory: tests/fixtures/sample_lean_repo
+        run: |
+          PYTHONPATH=../../../skills/implement/scripts python - <<'PY'
+          from pathlib import Path
+
+          from gate import detect_adapter, run_gate
+
+          repo = Path.cwd()
+          adapter = dict(detect_adapter(repo))
+          adapter["test_cmd"] = "lake env lean Fixtures/Red.lean"
+          result = run_gate(repo, adapter)
+          for name, phase in result.phase_results.items():
+              print(f"{name}: {'PASS' if phase.passed else 'FAIL'}")
+              print(phase.evidence)
+          test_phase = result.phase_results.get("test")
+          if result.passed or test_phase is None or test_phase.passed:
+              raise SystemExit("the deliberately broken Lean oracle unexpectedly passed")
+          PY

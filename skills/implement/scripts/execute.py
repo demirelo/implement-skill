@@ -101,14 +101,29 @@ def _copy_repo(repo_path, allow_files=()) -> str:
     return str(dst)
 
 
-def _repo_context(repo_path, max_chars=12000) -> str:
+def _repo_context(repo_path, max_chars=12000, context_globs=None) -> str:
     repo = _audit_repo_symlinks(repo_path)
+    context_globs = tuple(context_globs or _CONTEXT_GLOBS)
+
+    def matches(relative, name, pattern):
+        # pathlib's ``**/*.py`` requires one directory, unlike git-style globs. Check the
+        # repo-relative path first, then its zero-directory form so root and nested sources both
+        # obey the adapter's single declared glob.
+        return relative.match(pattern) or (
+            pattern.startswith("**/") and relative.match(pattern[3:])
+        ) or name.match(pattern)
+
     chunks, total = [], 0
     paths: set[Path] = set()
     for root, dirs, files in os.walk(repo, followlinks=False):
         dirs[:] = [d for d in dirs if d not in _SKIP_CONTEXT_DIRS]
-        paths.update(Path(root) / name for name in files
-                     if any(Path(name).match(pattern) for pattern in _CONTEXT_GLOBS))
+        paths.update(
+            Path(root) / name for name in files
+            if any(
+                matches(Path(root).relative_to(repo) / name, Path(name), pattern)
+                for pattern in context_globs
+            )
+        )
     for path in sorted(paths):
         rel = path.relative_to(repo)
         if {".git", ".lake", ".worktrees"}.intersection(rel.parts) or is_secret_file(path):
@@ -224,12 +239,15 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
     # #3: identical every turn (failed turns fully revert) — read once. An orchestrator can inject a
     # FOCUSED context (e.g. assembled from codebase-memory-mcp: only the symbols/files this task
     # touches + the failing test's callers) instead of the blunt full-tree dump — far fewer tokens.
-    repo_ctx = _repo_context(repo_path) if repo_ctx is None else repo_ctx
+    if repo_ctx is None:
+        context_globs = adapter.get("context_globs")
+        repo_ctx = (_repo_context(repo_path, context_globs=context_globs)
+                    if context_globs else _repo_context(repo_path))
     ledger: list = []      # human-readable, fed to the Builder prompt
     turns_log: list = []   # structured, fed to kill.should_stop
     if oracle_snapshot is not None:
         oracle_snapshot.restore()
-    gate_result = verification_context.run_gate()   # turn 0: FULL suite — establishes the oracle
+    gate_result = verification_context.run_full_gate()   # turn 0: FULL suite — establishes the oracle
     if gate_result.passed:   # H5: a "green" with 0 executed tests is a false green (no oracle), not success
         if gate_result.verified_count > 0 and not force_turn:
             return LoopResult(success=True, turns=0)
@@ -286,7 +304,7 @@ def run_inner_loop(repo_path, task_brief, adapter, dispatch_fn, max_turns=6, sec
             else:   # target green (or unscoped) — FULL confirm catches regressions + enforces H5
                 if oracle_snapshot is not None:
                     oracle_snapshot.restore()
-                full = verification_context.run_gate()
+                full = verification_context.run_full_gate()
                 if full.passed and full.verified_count > 0:
                     artifact_failure = _required_paths_feedback(
                         repo_path, required_paths, must_change=required_paths_must_change

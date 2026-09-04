@@ -211,7 +211,7 @@ def re_gate(repo, winner_diff, adapter, verification_context=None) -> ReGate:
     applied = apply_patch(repo, winner_diff)
     if not applied.ok:
         return ReGate(passed=False, executed=0, summary=f"winner diff did not apply: {applied.error[:120]}")
-    gr = verification_context.run_gate()   # H6: re-gate the winner under the sandbox too
+    gr = verification_context.run_full_gate()   # H6: full re-gate the winner under the sandbox
     if not gr.passed:
         _reset(repo)   # H4: a non-green winner is rolled back
         return ReGate(passed=False, executed=0, summary=gr.summary)

@@ -1,3 +1,4 @@
+import inspect
 import sys
 import subprocess
 import threading
@@ -87,6 +88,32 @@ def test_campaign_recognizes_lean_acceptance_module_changes():
 def test_local_verification_requires_context(tmp_path):
     with pytest.raises(CampaignError, match="VerificationContext"):
         campaign._verify_local(tmp_path)
+
+
+def test_final_local_confirmation_forces_an_unscoped_gate(monkeypatch, tmp_path):
+    work, context = _context(tmp_path)
+    adapter = context.adapter
+    monkeypatch.setattr(campaign, "detect_adapter", lambda _worktree: adapter)
+    seen = []
+
+    class Green:
+        passed = True
+        verified_count = 1
+        summary = "all checks pass"
+
+    def spy_full_gate():
+        seen.append(True)
+        return Green()
+
+    context.run_full_gate = spy_full_gate
+    try:
+        campaign._verify_local(work, context)
+    finally:
+        context.close()
+    assert seen == [True]
+    assert "only" not in inspect.signature(VerificationContext.run_full_gate).parameters
+    with pytest.raises(TypeError):
+        VerificationContext.run_full_gate(context, only=["tests/test_scoped.py"])
 
 
 def test_default_item_executor_closes_context_when_builder_fails(monkeypatch, tmp_path):
@@ -328,7 +355,8 @@ def test_campaign_ci_repair_restores_oracle_before_gate(monkeypatch, tmp_path):
     finally:
         context.close()
     assert dispatch_seen == [original]
-    assert seen == [original]
+    assert len(seen) == 3  # full test, lint, and type phases
+    assert all(content == original for content in seen)
 
 
 def test_review_diff_and_changed_files_include_untracked_artifacts(tmp_path):
