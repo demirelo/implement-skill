@@ -12,6 +12,7 @@ from workspace import (
     repo_context,
     WorkspaceError,
 )
+from gh import MergeConfirmation
 
 
 def _git_repo(tmp_path):
@@ -101,7 +102,9 @@ def test_persistent_pr_worktree_owns_branch_until_confirmed_merge(tmp_path):
         check=True,
     ).stdout.strip()
     assert branch == "implement/item-a"
-    remove_merged_worktree(str(repo), wt, "implement/item-a")
+    remove_merged_worktree(
+        str(repo), wt, "implement/item-a", confirmation=MergeConfirmation(True, {})
+    )
     assert not Path(wt).exists()
     branches = sp.run(
         ["git", "branch", "--list", "implement/item-a"],
@@ -111,3 +114,12 @@ def test_persistent_pr_worktree_owns_branch_until_confirmed_merge(tmp_path):
         check=True,
     ).stdout
     assert branches.strip() == ""
+
+
+def test_cleanup_refuses_unconfirmed_merge(tmp_path):
+    repo = _git_repo(tmp_path)
+    wt = create_branch_worktree(str(repo), "item-b", "implement/item-b", base="HEAD")
+    with pytest.raises(WorkspaceError, match="forge merge confirmation"):
+        remove_merged_worktree(str(repo), wt, "implement/item-b")
+    assert Path(wt).exists()
+    remove_worktree(str(repo), wt)

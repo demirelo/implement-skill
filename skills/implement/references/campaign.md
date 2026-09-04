@@ -43,9 +43,11 @@ Reject:
 overlap. Run that wave concurrently. After it settles, recompute readiness from actual item states.
 
 - No dependencies: base from freshly fetched `origin/<base>`.
-- One ready, unmerged dependency: create a stacked PR based on the dependency branch.
+- A ready or queued dependency never unlocks a child publication. If an existing stacked child is
+  being reconciled after the parent is confirmed merged, retarget/rebase it, run a fresh full gate
+  and review, and recheck forge status before it can merge.
 - Multiple dependencies: wait for all to merge before branching, unless a safe integration base
-  already exists.
+  already exists. Dependency readiness and forge merge confirmation are distinct states.
 - Failed dependency: mark downstream items blocked; continue unrelated workstreams.
 
 Git operations that mutate the shared repository metadata—fetch, worktree creation, cleanup—must be
@@ -68,7 +70,10 @@ separate worktrees.
 7. Route objective blockers back through the same Best-of-N configuration; re-gate and re-review.
 8. Open the PR as a draft from the existing worktree branch.
 9. Stabilize CI and mergeability.
-10. Finalize, assign, and green-gated merge or handoff.
+10. Finalize, assign, and green-gated merge or handoff. Forge lifecycle states are explicit:
+    `queued` (merge requested), `ready` (PR ready but unmerged), `merged` (state + `mergedAt` +
+    intended-base ancestry confirmed), `failed` (objective operation failed), and `blocked`
+    (dependency, review, duplicate, or policy blocker).
 
 ## CI repair loop
 
@@ -110,12 +115,18 @@ Keep the PR as the durable ledger:
 - conflict resolutions and risk notes.
 
 Mark ready and assign to the user only after the latest revision is Reviewer-approved,
-conflict-free, and green. Never use `--admin` or bypass branch protection.
+conflict-free, and green. Never use `--admin` or bypass branch protection. A successful forge merge
+request is only `queued`; cleanup and `merged` status require explicit forge confirmation.
 
 ## Cleanup and progress
 
-Delete a worktree/local branch only after the forge confirms merge. Retain ready, blocked, or failed
-worktrees for diagnosis.
+Delete a worktree/local branch only after the forge confirms merge. Retain queued, ready, blocked,
+or failed worktrees for diagnosis.
+
+Before opening or finalizing a PR, the campaign uses one canonical exact/prefix/glob matcher to
+check actual changed files against the Plan item's touched areas and the entire publication wave.
+An existing open PR with the same title and same scope blocks a duplicate unless the Plan opts into
+an explicit reconciliation.
 
 Report `Campaign: X/Y items complete (Z%).` after draft, repair, ready, and merge transitions. Ready
 with satisfied gates and merged both count as complete.

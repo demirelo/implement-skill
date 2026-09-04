@@ -175,10 +175,13 @@ checks are green:
 - update the PR body and post the curated review record;
 - mark the PR ready;
 - assign it to the user;
-- auto-merge without bypassing branch protection when repository policy permits.
+- request auto-merge without bypassing branch protection when repository policy permits; a successful
+  forge command is only `queued` until merged state, `mergedAt`, and intended-base reachability are
+  confirmed.
 
 Leave a ready PR instead of merging when required approvals or repository policy still block it.
-After confirmed merge, remove only that PR's worktree and local branch.
+After confirmed merge, remove only that PR's worktree and local branch. Keep queued, ready, failed,
+and blocked worktrees for diagnosis.
 
 ## Reporting
 

@@ -2,6 +2,7 @@ import inspect
 import sys
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
@@ -15,11 +16,18 @@ from campaign import (
     PlanItem,
     RoleModels,
     execution_waves,
+    reconcile_stacked_child,
+    scope_matches,
+    scopes_overlap,
+    scope_violations,
+    wave_scope_collisions,
     run_campaign,
 )
 from execute import BestResult
 from oracle import AcceptanceCriterion, AuthoredTest, protect_oracle
 from review import ReviewRound
+from publish import RunArtifacts, finalize
+from gh import PrRef
 from verification import VerificationContext
 
 
@@ -77,6 +85,177 @@ def test_execution_waves_serialize_predicted_conflicts():
         ]
     })
     assert [[x.id for x in wave] for wave in waves] == [["a"], ["b"]]
+
+
+def test_scope_matcher_canonicalizes_root_double_slash_and_rejects_traversal():
+    assert scope_matches("./src//with space.py", "src")
+    assert scope_matches("root.py", "./")
+    assert scopes_overlap("./src", "src//nested")
+    assert not scope_matches("../outside.py", "./")
+    assert scope_violations(["src/ok.py", "../outside.py"],
+                            PlanItem("x", "X", "scope", touched_areas=("src",))) == [
+                                "../outside.py"
+                            ]
+
+
+def test_wave_scope_collision_uses_actual_paths_not_only_item_order():
+    left = PlanItem("a", "A", "scope", touched_areas=("src/a",))
+    right = PlanItem("b", "B", "scope", touched_areas=("src/b",))
+    assert wave_scope_collisions([(left, ["src/b/shared.py"]),
+                                  (right, ["src/b/shared.py"])]) == [
+                                      {"items": ("a", "b"),
+                                       "matched_files": ["src/b/shared.py"]}
+                                  ]
+
+
+def test_publication_barrier_releases_only_after_every_wave_candidate_is_checked():
+    left = PlanItem("a", "A", "scope", touched_areas=("src/a",))
+    right = PlanItem("b", "B", "scope", touched_areas=("src/b",))
+    barrier = campaign._PublicationBarrier([left, right])
+    created = []
+
+    def publish(item):
+        barrier.wait(item, [f"src/{item.id}/main.py"])
+        created.append(item.id)  # stand-in for gh pr create
+
+    worker = threading.Thread(target=publish, args=(left,))
+    worker.start()
+    time.sleep(0.02)
+    assert created == []
+    publish(right)
+    worker.join(timeout=1)
+    assert sorted(created) == ["a", "b"]
+
+
+def test_child_waits_for_confirmed_parent_not_ready_dependency():
+    parent = ItemResult(item_id="parent", status="ready", branch="implement/parent")
+    plan = campaign.CampaignPlan("g", (
+        PlanItem("parent", "Parent", "p"),
+        PlanItem("child", "Child", "c", deps=("parent",)),
+    ))
+    with pytest.raises(CampaignError, match="confirmed merged"):
+        campaign._base_for_item(plan, plan.items[1], {"parent": parent}, lambda *_a, **_k: None, "/repo")
+
+
+def test_campaign_marks_child_blocked_when_parent_is_ready_not_merged():
+    def execute(item, _roles, _prior):
+        return ItemResult(item_id=item.id, status="ready", branch=f"implement/{item.id}")
+
+    result = run_campaign(
+        "/repo",
+        {"items": [
+            {"id": "parent", "title": "Parent", "touched_areas": ["src/p"],
+             "acceptance": [{"id": "P-1", "statement": "p", "oracle_path": "tests/p.py"}]},
+            {"id": "child", "title": "Child", "deps": ["parent"], "touched_areas": ["src/c"],
+             "acceptance": [{"id": "C-1", "statement": "c", "oracle_path": "tests/c.py"}]},
+        ]},
+        builders=["a"], reviewer="reviewer", profile=_profile(), item_executor=execute,
+    )
+    assert result.items["child"].status == "blocked"
+    assert "confirmed merged" in result.items["child"].error
+
+
+class _StatefulForge:
+    """Small fake forge that distinguishes merge request acceptance from merged state."""
+
+    def __init__(self, merged=False):
+        self.merged = merged
+        self.calls = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(argv)
+        class Proc:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+        proc = Proc()
+        if argv[:3] == ["gh", "pr", "create"]:
+            proc.stdout = "https://github.com/o/r/pull/9\n"
+        elif argv[:3] == ["gh", "pr", "view"]:
+            proc.stdout = (
+                '{"state":"MERGED","mergedAt":"2026-09-04T12:00:00Z",'
+                '"mergeCommit":{"oid":"merge-sha"}}'
+                if self.merged else '{"state":"OPEN","mergedAt":null}'
+            )
+        return proc
+
+
+def _green_artifacts(**overrides):
+    values = dict(
+        goal="g", branch="feat/x", title="T", consensus_notes="notes",
+        acceptance_k=1, acceptance_n=1,
+        acceptance_evidence={"C1": True}, acceptance_ids=("C1",),
+        review=ReviewRound([], [], [], "accept", []), regate_passed=True,
+        intended_base="base-sha",
+    )
+    values.update(overrides)
+    return RunArtifacts(**values)
+
+
+def test_campaign_forge_merge_request_stays_queued_until_state_confirmed():
+    fake = _StatefulForge(merged=False)
+    result = finalize("/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"),
+                      _green_artifacts(), runner=fake)
+    assert result.state == "queued" and not result.merged
+    assert any(command[:3] == ["gh", "pr", "merge"] for command in fake.calls)
+
+
+def test_stacked_child_cannot_request_merge_before_parent_reconciliation():
+    fake = _StatefulForge(merged=True)
+    result = finalize(
+        "/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"),
+        _green_artifacts(stacked_on="implement/parent"), runner=fake,
+    )
+    assert result.state == "blocked" and not result.merged
+    assert not any(command[:3] == ["gh", "pr", "merge"] for command in fake.calls)
+
+
+def test_stacked_child_retarget_rebase_regate_review_and_recheck_order():
+    events = []
+
+    def runner(argv, **_kwargs):
+        events.append(tuple(argv[:3]))
+        class Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return Proc()
+
+    assert reconcile_stacked_child(
+        "/repo", 9, base="main", runner=runner,
+        fresh_review=lambda: events.append("review") or True,
+        recheck=lambda: events.append("recheck") or True,
+    )
+    assert events[:3] == [
+        ("gh", "pr", "edit"), ("git", "fetch", "origin"), ("git", "rebase", "origin/main"),
+    ]
+    assert events[-2:] == ["review", "recheck"]
+
+
+def test_campaign_finalization_blocks_bodyless_changes_requested_and_inline_thread():
+    fake = _StatefulForge()
+    result = finalize(
+        "/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"), _green_artifacts(),
+        runner=fake,
+        forge_feedback={
+            "reviewDecision": "CHANGES_REQUESTED",
+            "reviews": [{"state": "CHANGES_REQUESTED", "body": ""}],
+            "inlineThreads": [{"path": "src/a.py", "isResolved": False}],
+        },
+    )
+    assert result.state == "blocked"
+    assert not any(command[:3] == ["gh", "pr", "merge"] for command in fake.calls)
+
+
+def test_campaign_detects_same_title_same_scope_open_pr(monkeypatch):
+    monkeypatch.setattr(campaign, "list_open_prs", lambda *a, **k: [
+        {"number": 3, "title": "Same", "headRefName": "other", "url": "u"}
+    ])
+    monkeypatch.setattr(campaign, "pr_files", lambda *a, **k: ["src/a/file.py"])
+    monkeypatch.setattr(campaign, "_run", lambda *a, **k: "")
+    item = PlanItem("x", "Same", "scope", touched_areas=("src/a",))
+    overlaps = campaign.inspect_overlaps("/repo", item, runner=lambda *a, **k: None)
+    assert overlaps and overlaps[0]["duplicate"] is True
 
 
 def test_campaign_recognizes_lean_acceptance_module_changes():
@@ -391,7 +570,7 @@ def test_run_campaign_defaults_to_parallel_and_threads_best_of_n():
             barrier.wait()
         with lock:
             seen.append((item.id, roles.best_of_n, set(prior)))
-        return ItemResult(item_id=item.id, status="ready", branch=f"implement/{item.id}")
+        return ItemResult(item_id=item.id, status="merged", branch=f"implement/{item.id}", merged=True)
 
     result = run_campaign(
         "/repo",

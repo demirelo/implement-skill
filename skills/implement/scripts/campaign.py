@@ -30,6 +30,7 @@ from gh import (
     pr_feedback,
     pr_files,
     pr_status,
+    retarget_pr,
     wait_for_checks,
 )
 from implement import run_implement
@@ -110,6 +111,7 @@ class PlanItem:
     required_paths: tuple[str, ...] = ()
     branch: str = ""
     tests_required: bool = True
+    reconcile_open_pr: bool = False
 
     @classmethod
     def from_mapping(cls, raw: dict, index: int = 0):
@@ -145,6 +147,7 @@ class PlanItem:
             required_paths=tuple(str(x) for x in raw.get("required_paths", ())),
             branch=str(raw.get("branch", "")).strip(),
             tests_required=bool(raw.get("tests_required", True)),
+            reconcile_open_pr=bool(raw.get("reconcile_open_pr", raw.get("reconcile", False))),
         )
 
 
@@ -182,6 +185,7 @@ class ItemResult:
     merged: bool = False
     error: str = ""
     overlaps: list = field(default_factory=list)
+    changed_files: tuple[str, ...] = ()
 
 
 @dataclass
@@ -211,8 +215,7 @@ def _areas_conflict(left: PlanItem, right: PlanItem) -> bool:
         return True
     for a in left.touched_areas:
         for b in right.touched_areas:
-            aa, bb = a.rstrip("/"), b.rstrip("/")
-            if aa == bb or aa.startswith(bb + "/") or bb.startswith(aa + "/"):
+            if scopes_overlap(a, b):
                 return True
     return False
 
@@ -278,12 +281,147 @@ def _sync_base(repo, base, runner) -> str:
     return f"origin/{base}"
 
 
+def _canonical_scope(value: str) -> str | None:
+    """Canonicalize a repo-relative path/pattern for every scope decision.
+
+    This deliberately accepts only the small grammar used by Plan touched areas.  Ambiguous
+    absolute, traversal, and backslash paths are rejected rather than interpreted differently by
+    git, fnmatch, and the forge.
+    """
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw or raw.startswith("/") or "\x00" in raw:
+        return None
+    parts = [part for part in raw.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        return None
+    return "/".join(parts)
+
+
+def scope_matches(path: str, area: str) -> bool:
+    """Match one changed path against one exact/prefix/glob Plan area."""
+    candidate, pattern = _canonical_scope(path), _canonical_scope(area)
+    if candidate is None or pattern is None:
+        return False
+    if pattern == "":
+        return True
+    if any(char in pattern for char in "*?["):
+        # fnmatch's ``**/`` does not match zero directories on all supported Python versions;
+        # explicitly include the root-level spelling while retaining the same canonical matcher.
+        patterns = (pattern, pattern[3:]) if pattern.startswith("**/") else (pattern,)
+        return any(fnmatch(candidate, current) for current in patterns)
+    return candidate == pattern or candidate.startswith(pattern.rstrip("/") + "/")
+
+
+def scopes_overlap(left: str, right: str) -> bool:
+    """Conservative overlap check using the same canonical grammar as ``scope_matches``."""
+    a, b = _canonical_scope(left), _canonical_scope(right)
+    if a is None or b is None:
+        return True
+    if not a or not b:
+        return True
+    if scope_matches(a, b) or scope_matches(b, a):
+        return True
+    # There is no sound finite witness for two arbitrary globs.  Compare their literal prefixes
+    # and serialize when those prefixes intersect; disjoint prefixes remain parallel-safe.
+    def prefix(pattern):
+        return pattern.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0].rstrip("/")
+    pa, pb = prefix(a), prefix(b)
+    return bool(pa and pb and (pa == pb or pa.startswith(pb + "/") or pb.startswith(pa + "/")))
+
+
 def _path_in_area(path: str, area: str) -> bool:
-    path, area = path.lstrip("./"), area.lstrip("./")
-    if any(x in area for x in "*?["):
-        return fnmatch(path, area)
-    area = area.rstrip("/")
-    return path == area or path.startswith(area + "/")
+    return scope_matches(path, area)
+
+
+def scope_violations(paths, item: PlanItem) -> list[str]:
+    """Return changed files outside an item's declared touched areas."""
+    if not item.touched_areas:
+        return sorted(dict.fromkeys(str(path) for path in paths if str(path).strip()))
+    return sorted(dict.fromkeys(
+        str(path) for path in paths
+        if str(path).strip() and not any(scope_matches(path, area) for area in item.touched_areas)
+    ))
+
+
+def wave_scope_collisions(entries) -> list[dict]:
+    """Check actual changed files against every item in one publication wave.
+
+    ``entries`` accepts ``(PlanItem, paths)`` pairs or objects exposing ``item`` and
+    ``changed_files``.  A collision means either item claims the other's changed path; this is
+    intentionally conservative at the publication boundary.
+    """
+    rows = []
+    for entry in entries:
+        if isinstance(entry, tuple) and len(entry) == 2:
+            item, paths = entry
+        else:
+            item, paths = getattr(entry, "item", None), getattr(entry, "changed_files", ())
+        if isinstance(item, PlanItem):
+            rows.append((item, tuple(paths or ())))
+    collisions = []
+    for i, (left, left_paths) in enumerate(rows):
+        for right, right_paths in rows[i + 1:]:
+            matched = sorted({
+                path for path in left_paths
+                if any(scope_matches(path, area) for area in right.touched_areas)
+            } | {
+                path for path in right_paths
+                if any(scope_matches(path, area) for area in left.touched_areas)
+            })
+            if matched or any(scopes_overlap(a, b) for a in left.touched_areas for b in right.touched_areas):
+                collisions.append({"items": (left.id, right.id), "matched_files": matched})
+    return collisions
+
+
+class _PublicationBarrier:
+    """Hold every wave at the publication boundary until actual scopes are checked.
+
+    Builders, gates, and review may run concurrently.  No executor may call ``open_draft`` until
+    all successful candidates in the wave have supplied their actual changed paths, so a pairwise
+    collision cannot be discovered only after one PR has already been created.
+    """
+
+    def __init__(self, items):
+        self._expected = {item.id: item for item in items}
+        self._arrived = {}
+        self._failure = None
+        self._condition = threading.Condition()
+
+    def fail(self, item_id, error):
+        with self._condition:
+            if self._failure is None:
+                self._failure = CampaignError(
+                    f"wave candidate {item_id!r} failed before publication: {error}"
+                )
+            self._condition.notify_all()
+
+    def wait(self, item, paths):
+        violations = scope_violations(paths, item)
+        with self._condition:
+            if violations and self._failure is None:
+                self._failure = CampaignError(
+                    f"changed files outside declared Plan item scope for {item.id}: "
+                    + ", ".join(violations)
+                )
+            self._arrived[item.id] = tuple(paths or ())
+            if len(self._arrived) == len(self._expected) and self._failure is None:
+                collisions = wave_scope_collisions(
+                    (self._expected[item_id], changed)
+                    for item_id, changed in self._arrived.items()
+                )
+                if collisions:
+                    self._failure = CampaignError(
+                        "actual changed-file collision before publication: "
+                        + "; ".join(
+                            f"{row['items']}: {', '.join(row['matched_files']) or 'overlapping scope'}"
+                            for row in collisions
+                        )
+                    )
+                self._condition.notify_all()
+            while len(self._arrived) < len(self._expected) and self._failure is None:
+                self._condition.wait()
+            if self._failure is not None:
+                raise self._failure
 
 
 def inspect_overlaps(repo, item: PlanItem, *, base="main", exclude_heads=(),
@@ -300,8 +438,16 @@ def inspect_overlaps(repo, item: PlanItem, *, base="main", exclude_heads=(),
             if any(_path_in_area(path, area) for area in item.touched_areas)
         })
         same_title = str(row.get("title", "")).strip().lower() == item.title.strip().lower()
+        row_areas = row.get("touchedAreas", row.get("touched_areas", ()))
+        same_scope = bool(matched) or any(
+            scopes_overlap(str(a), str(b))
+            for a in (row_areas if isinstance(row_areas, (list, tuple)) else ())
+            for b in item.touched_areas
+        )
         if matched or same_title:
-            overlaps.append({**row, "kind": "pr", "matched_files": matched})
+            overlaps.append({**row, "kind": "pr", "matched_files": matched,
+                             "same_title": same_title, "same_scope": same_scope,
+                             "duplicate": same_title and same_scope})
 
     refs = _run(
         ["git", "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"],
@@ -843,16 +989,44 @@ def _base_for_item(plan, item, prior, runner, repo):
     dep_results = [prior[x] for x in item.deps]
     if all(x.merged for x in dep_results):
         return _sync_base(repo, plan.base, runner), plan.base
-    ready = [x for x in dep_results if x.status == "ready" and x.branch]
-    if len(dep_results) == 1 and len(ready) == 1:
-        return _sync_base(repo, ready[0].branch, runner), ready[0].branch
     raise CampaignError(
-        "an item with multiple dependencies waits until all dependency PRs merge"
+        "dependency PRs must be confirmed merged before a child can be published; "
+        "retarget/rebase and re-gate any existing stacked child first"
     )
 
 
+def reconcile_stacked_child(repo, pr, *, base, worktree=None, verification_context=None,
+                            fresh_review=None, recheck=None, runner=subprocess.run) -> bool:
+    """Retarget a stacked child only after its parent has merged.
+
+    The caller supplies the already-confirmed parent merge as the scheduling precondition.  This
+    helper then performs the ordered safety steps: forge retarget, local rebase, full gate, fresh
+    review, and forge check recheck.  A failed step leaves the child unmerged and raises, so a
+    queued child can never be promoted by merely observing the parent's old branch.
+    """
+    target = worktree or repo
+    _validate_ref(str(base), "stacked child base")
+    retarget_pr(target, pr, str(base), runner=runner)
+    _run(["git", "fetch", "origin", str(base)], target, runner)
+    _run(["git", "rebase", f"origin/{base}"], target, runner)
+    if verification_context is not None:
+        _require_verification_context(target, verification_context)
+        result = verification_context.run_full_gate()
+        if not result.passed or result.verified_count <= 0:
+            raise CampaignError(f"stacked child full re-gate failed: {result.summary}")
+    if fresh_review is not None:
+        verdict = fresh_review()
+        routed = getattr(verdict, "routed", None)
+        escalated = getattr(verdict, "escalated", None)
+        if verdict is False or bool(routed) or bool(escalated):
+            raise CampaignError("stacked child fresh review did not approve")
+    if recheck is not None and not recheck():
+        raise CampaignError("stacked child forge checks are not green after rebase")
+    return True
+
+
 def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_dispatchers,
-                           runner, env, trusted, prior, item) -> ItemResult:
+                           runner, env, trusted, prior, item, publication_barrier=None) -> ItemResult:
     branch, worktree = _branch(item), ""
     verification_context = None
     try:
@@ -862,6 +1036,15 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
         overlaps = inspect_overlaps(
             repo, item, base=pr_base, exclude_heads=exclude, runner=runner
         )
+        duplicates = [x for x in overlaps if x.get("kind") == "pr" and x.get("duplicate")]
+        if duplicates and not item.reconcile_open_pr:
+            labels = ", ".join(
+                f"#{x.get('number', '?')} {x.get('title', '')}" for x in duplicates
+            )
+            raise CampaignError(
+                f"same-title/same-scope open PR already exists ({labels}); "
+                "set reconcile_open_pr only after explicit reconciliation"
+            )
         with _ROOT_GIT_LOCK:
             worktree = create_branch_worktree(
                 repo, item.id, branch, base=base_ref, runner=runner
@@ -925,7 +1108,11 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
         changed = _changed_files(worktree, base_sha, runner)
         if item.tests_required and not _has_test_change(changed):
             raise CampaignError("Plan item changed behavior without adding or updating tests")
-
+        violations = scope_violations(changed, item)
+        if violations:
+            raise CampaignError(
+                "changed files outside declared Plan item scope: " + ", ".join(violations)
+            )
         review_fn = _reviewer(profile, roles.reviewer, reviewer_fn, runner)
         review_round = _final_review_loop(
             worktree, item, roles, profile, review_fn, builder_dispatchers,
@@ -959,7 +1146,22 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             review=review_round,
             regate_passed=True,
             trace=decision_trace(best),
+            intended_base=base_sha,
+            stacked_on=(pr_base if item.deps and not all(x.merged for x in
+                                                          (prior[d] for d in item.deps if d in prior))
+                        else ""),
         )
+        # The wave barrier is deliberately after the final review/full gate.  Actual candidate
+        # paths can change during repair, and no wave member may create a PR until all final paths
+        # have been checked pairwise against the declared areas.
+        changed = _changed_files(worktree, base_sha, runner)
+        violations = scope_violations(changed, item)
+        if violations:
+            raise CampaignError(
+                "final changed files outside declared Plan item scope: " + ", ".join(violations)
+            )
+        if publication_barrier is not None:
+            publication_barrier.wait(item, changed)
         pr = open_draft(
             worktree,
             artifacts,
@@ -1048,6 +1250,24 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
         artifacts.acceptance_k = sum(value is True for value in evidence.values())
         artifacts.acceptance_n = len(criteria)
 
+        changed = _changed_files(worktree, base_sha, runner)
+        violations = scope_violations(changed, item)
+        if violations:
+            raise CampaignError(
+                "repaired changed files outside declared Plan item scope: "
+                + ", ".join(violations)
+            )
+        try:
+            forge_feedback = pr_feedback(worktree, pr, runner=runner)
+        except ForgeError as exc:
+            # Review state is part of finalization.  An unavailable response is blocked rather
+            # than silently treated as an empty review, preserving the forge fail-closed boundary.
+            forge_feedback = {
+                "reviewDecision": "CHANGES_REQUESTED",
+                "reviews": [{"state": "CHANGES_REQUESTED", "body": ""}],
+                "_error": str(exc),
+            }
+
         handoff = finalize(
             worktree,
             pr,
@@ -1055,11 +1275,14 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             autonomy=profile.get("prefs", {}).get("autonomy", "auto-merge"),
             assignee="@me",
             runner=runner,
+            forge_feedback=forge_feedback,
         )
-        status = "merged" if handoff.merged else "ready"
+        status = handoff.state
         if handoff.merged:
             with _ROOT_GIT_LOCK:
-                remove_merged_worktree(repo, worktree, branch, runner=runner)
+                remove_merged_worktree(
+                    repo, worktree, branch, runner=runner, confirmation=handoff.confirmation
+                )
             worktree = ""
         return ItemResult(
             item_id=item.id,
@@ -1069,8 +1292,11 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             pr_url=pr.url,
             merged=handoff.merged,
             overlaps=overlaps,
+            changed_files=tuple(changed),
         )
     except Exception as exc:
+        if publication_barrier is not None:
+            publication_barrier.fail(item.id, exc)
         return ItemResult(
             item_id=item.id,
             status="failed",
@@ -1199,10 +1425,21 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
 
         completed = {
             iid for iid, result in results.items()
-            if result.status in {"ready", "merged"}
+            if result.status == "merged"
         }
         ready = [x for x in pending if set(x.deps) <= completed]
         if not ready:
+            waiting = [x for x in pending if any(dep in results for dep in x.deps)]
+            if waiting:
+                waiting_ids = {item.id for item in waiting}
+                for item in waiting:
+                    results[item.id] = ItemResult(
+                        item_id=item.id,
+                        status="blocked",
+                        error="waiting for every dependency PR to reach confirmed merged state",
+                    )
+                pending = [x for x in pending if x.id not in waiting_ids]
+                continue
             raise CampaignError("Plan dependency cycle detected")
         wave: list[PlanItem] = []
         for item in ready:
@@ -1214,6 +1451,7 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
             wave = [ready[0]]
 
         prior = dict(results)
+        publication_barrier = _PublicationBarrier(wave) if item_executor is None else None
 
         def execute(item):
             if item_executor is not None:
@@ -1221,6 +1459,7 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
             return _default_item_executor(
                 repo, plan, roles, profile, reviewer_fn, overrides,
                 runner, env, trusted, prior, item,
+                publication_barrier=publication_barrier,
             )
 
         with ThreadPoolExecutor(max_workers=min(len(wave), 8)) as pool_executor:
@@ -1235,6 +1474,23 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
                         error=f"{type(exc).__name__}: {exc}",
                     )
                 results[item.id] = result
+        actual_collisions = wave_scope_collisions(
+            (item, results[item.id].changed_files) for item in wave
+            if item.id in results
+        )
+        if actual_collisions:
+            # The default executor checks its own scope before opening a PR.  This second wave
+            # check protects injected/offline executors and future publication backends from
+            # claiming a clean wave when actual diffs collide.
+            for collision in actual_collisions:
+                for item_id in collision["items"]:
+                    result = results[item_id]
+                    if result.status in {"ready", "queued"}:
+                        result.status = "blocked"
+                        result.error = (
+                            "actual changed-file collision in publication wave: "
+                            + ", ".join(collision["matched_files"] or collision["items"])
+                        )
         ran = {x.id for x in wave}
         pending = [x for x in pending if x.id not in ran]
 
