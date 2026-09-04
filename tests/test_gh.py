@@ -13,6 +13,9 @@ from gh import (
     checks_failed,
     has_merge_conflict,
     new_feedback_messages,
+    feedback_blockers,
+    pr_feedback,
+    confirm_merge,
     PrRef,
     ForgeError,
 )
@@ -141,6 +144,62 @@ def test_check_and_merge_status_helpers():
     assert not has_merge_conflict({"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"})
 
 
+def test_feedback_blockers_include_bodyless_requests_and_unresolved_inline_threads():
+    blockers = feedback_blockers({
+        "reviewDecision": "CHANGES_REQUESTED",
+        "reviews": [{"state": "CHANGES_REQUESTED", "body": ""}],
+        "threads": [{"path": "src/auth.py", "isResolved": False}],
+    })
+    assert any("body-less" in item for item in blockers)
+    assert any("src/auth.py" in item for item in blockers)
+
+
+def test_pr_feedback_fetches_authoritative_graphql_review_threads():
+    class ThreadForge(FakeRun):
+        def __call__(self, argv, **kw):
+            self.calls.append((argv, kw.get("input")))
+            class P:
+                returncode = 0
+                stderr = ""
+                stdout = "{}"
+            if argv[:3] == ["gh", "pr", "view"]:
+                P.stdout = '{"reviewDecision":"APPROVED","reviews":[],"comments":[]}'
+            elif argv[:3] == ["gh", "api", "graphql"]:
+                P.stdout = '{"data":{"repository":{"pullRequest":{"reviewThreads":{' \
+                           '"nodes":[{"path":"src/a.py","isResolved":false}]}}}}}'
+            return P()
+
+    fake = ThreadForge()
+    data = pr_feedback(
+        "/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"), runner=fake
+    )
+    assert data["reviewThreads"][0]["isResolved"] is False
+    assert any(argv[:3] == ["gh", "api", "graphql"] for argv, _ in fake.calls)
+
+
+def test_confirm_merge_requires_forge_state_timestamp_and_base_ancestry():
+    class Confirmed(FakeRun):
+        def __call__(self, argv, **kw):
+            self.calls.append((argv, kw.get("input")))
+            class P:
+                returncode = 0
+                stderr = ""
+                stdout = (
+                    '{"state":"MERGED","mergedAt":"2026-09-04T12:00:00Z",'
+                    '"mergeCommit":{"oid":"merge-sha"}}'
+                    if argv[:3] == ["gh", "pr", "view"] else ""
+                )
+            return P()
+
+    result = confirm_merge("/repo", 9, intended_base="base-sha", runner=Confirmed())
+    assert result.confirmed is True and result.state == "merged"
+
+
+def test_confirm_merge_without_forge_evidence_stays_queued():
+    result = confirm_merge("/repo", 9, intended_base="base-sha", runner=FakeRun())
+    assert result.confirmed is False and result.state == "queued"
+
+
 def test_new_feedback_messages_deduplicates_by_id():
     data = {
         "reviews": [{"id": "r1", "state": "CHANGES_REQUESTED", "body": "fix auth",
@@ -164,7 +223,8 @@ def test_merge_pr_squash_deletes_branch_and_never_admin():
     fake = FakeRun(out="")
     merge_pr("/repo", PrRef(number=9, url="https://github.com/o/r/pull/9", branch="feat/x"), runner=fake)
     argv = fake.calls[0][0]
-    assert argv[:3] == ["gh", "pr", "merge"] and "--squash" in argv and "--delete-branch" in argv
+    assert argv[:3] == ["gh", "pr", "merge"] and "--squash" in argv
+    assert "--delete-branch" not in argv
     assert "--admin" not in argv          # NEVER bypass branch protection / required reviews
     assert argv[3] == "https://github.com/o/r/pull/9"
 

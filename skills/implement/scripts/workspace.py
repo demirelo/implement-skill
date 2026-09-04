@@ -9,6 +9,7 @@ from pathlib import Path
 
 from scrub import is_secret_file, scrub, env_secrets
 from lean_support import hydrate_lean_cache
+from gh import MergeConfirmation
 
 _HEAVY = {".git", ".lake", ".venv", "venv", "node_modules", "dist", "build", "__pycache__", ".worktrees"}
 _CONTEXT_SPECS = ("*.py", "*.lean", "lakefile.toml", "lakefile.lean", "lean-toolchain")
@@ -67,8 +68,15 @@ def remove_worktree(repo, path, runner=subprocess.run) -> None:
            capture_output=True, text=True)
 
 
-def remove_merged_worktree(repo, path, branch, runner=subprocess.run) -> None:
-    """Remove only the worktree and local branch belonging to a confirmed merged PR."""
+def remove_merged_worktree(repo, path, branch, runner=subprocess.run, *, confirmation=None) -> None:
+    """Remove only a worktree whose forge merge has already been confirmed.
+
+    Cleanup is intentionally a separate, evidence-gated operation.  A successful merge request,
+    an open/ready PR, or a caller's optimistic boolean is not enough to make the local branch
+    recoverable, so callers must pass the result object returned by ``gh.confirm_merge`` explicitly.
+    """
+    if not isinstance(confirmation, MergeConfirmation) or confirmation.confirmed is not True:
+        raise WorkspaceError("refusing cleanup before forge merge confirmation")
     remove_worktree(repo, path, runner=runner)
     # `gh pr merge --delete-branch` may already have removed the local branch. Cleanup is
     # idempotent after merge confirmation: absence is success, never a reason to resurrect/fail.

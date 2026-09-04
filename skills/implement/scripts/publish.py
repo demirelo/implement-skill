@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 
 from gh import (commit_and_push, open_draft_pr, update_body, post_comment, mark_ready,
-                merge_pr, assign_pr, PrRef, ForgeError)
+                merge_pr, confirm_merge, feedback_blockers, assign_pr, PrRef, ForgeError)
 from handoff import tier, render_pr_body, render_review_comment
 from scrub import scrub, env_secrets
 
@@ -19,6 +19,9 @@ from scrub import scrub, env_secrets
 class Handoff:
     tier: str            # green | yellow | red
     merged: bool = False  # auto-merge fired (green + autonomy=auto-merge + forge allowed it)
+    state: str = "ready"  # queued | ready | merged | failed | blocked
+    reason: str = ""
+    confirmation: object = None
 
 
 @dataclass
@@ -36,6 +39,12 @@ class RunArtifacts:
     # promoted to a green tier.  Kept optional for callers that predate criterion-linked plans.
     acceptance_evidence: dict | None = None
     acceptance_ids: tuple[str, ...] = ()
+    # Exact base used for the local final gate.  Forge confirmation must prove that the merge
+    # commit descends from this value; omitting it intentionally prevents a confirmed merge.
+    intended_base: str = ""
+    # A child based on an unmerged dependency is publishable only as a blocked/ready handoff.  It
+    # must be retargeted, re-gated, freshly reviewed, and rechecked after the parent merges.
+    stacked_on: str = ""
 
 
 def _secrets(secrets):
@@ -53,7 +62,7 @@ def open_draft(repo, artifacts, *, base="main", sign=True, existing_branch=False
 
 
 def finalize(repo, pr, artifacts, *, autonomy="auto-merge", merge_method="squash",
-             assignee=None, secrets=None, runner=subprocess.run) -> Handoff:
+             assignee=None, secrets=None, runner=subprocess.run, forge_feedback=None) -> Handoff:
     sec = _secrets(secrets)
     # 0/0 acceptance is a false green (same class as the H5 re_gate guard) — never tier it green
     evidence = artifacts.acceptance_evidence
@@ -79,6 +88,15 @@ def finalize(repo, pr, artifacts, *, autonomy="auto-merge", merge_method="squash
                                 acceptance_ids=artifacts.acceptance_ids), sec)
     update_body(repo, pr, body, runner=runner)
     post_comment(repo, pr, scrub(render_review_comment(artifacts.review), sec), runner=runner)
+    blockers = feedback_blockers(forge_feedback) if forge_feedback is not None else []
+    if blockers:
+        post_comment(
+            repo,
+            pr,
+            scrub("## Forge lifecycle blocker\n\n" + "\n".join(f"- {x}" for x in blockers), sec),
+            runner=runner,
+        )
+        return Handoff(tier=label, merged=False, state="blocked", reason="; ".join(blockers))
     mark_ready(repo, pr, runner=runner)
     if assignee:
         assign_pr(repo, pr, assignee=assignee, runner=runner)
@@ -87,10 +105,33 @@ def finalize(repo, pr, artifacts, *, autonomy="auto-merge", merge_method="squash
     # the ready PR waits. A forge that requires reviews/checks refuses the merge (ForgeError), and we
     # degrade to that same handoff rather than bypassing branch protection.
     merged = False
+    state = "ready"
+    reason = ""
+    confirmation = None
     if autonomy == "auto-merge" and label == "green":
+        if artifacts.stacked_on:
+            return Handoff(
+                tier=label,
+                merged=False,
+                state="blocked",
+                reason=(
+                    f"stacked child waits for unmerged dependency {artifacts.stacked_on!r}; "
+                    "retarget/rebase, re-gate, fresh-review, and recheck are required after merge"
+                ),
+            )
         try:
-            merge_pr(repo, pr, method=merge_method, runner=runner)
-            merged = True
-        except ForgeError:
-            merged = False
-    return Handoff(tier=label, merged=merged)
+            merge_pr(repo, pr, method=merge_method, delete_branch=False, runner=runner)
+            # A successful command only queues the merge.  The forge's explicit state, timestamp,
+            # merge commit, and ancestry check decide whether cleanup/merged status is allowed.
+            confirmation = confirm_merge(
+                repo, pr, intended_base=artifacts.intended_base, runner=runner
+            )
+            merged = confirmation.confirmed
+            state = "merged" if merged else "queued"
+            reason = confirmation.reason
+        except ForgeError as exc:
+            # Branch protection and required approvals are a blocked handoff, never a merge.
+            state = "blocked"
+            reason = str(exc)
+    return Handoff(tier=label, merged=merged, state=state, reason=reason,
+                   confirmation=confirmation)

@@ -153,13 +153,57 @@ def _gh_verbs(fake):
 
 
 def test_finalize_auto_merges_on_green():
-    # default autonomy=auto-merge + a fully-green tier -> merge after ready
+    # A successful command only queues the merge when no exact-base confirmation is available.
     fake = FakeRun()
     ref = open_draft("/repo", _artifacts(), sign=False, runner=fake)
     fake.calls.clear()
     res = finalize("/repo", ref, _artifacts(), runner=fake)   # default autonomy
     assert _gh_verbs(fake) == [["pr", "edit"], ["pr", "comment"], ["pr", "ready"], ["pr", "merge"]]
-    assert res.tier == "green" and res.merged is True
+    assert res.tier == "green" and res.merged is False and res.state == "queued"
+
+
+def test_finalize_marks_merged_only_after_forge_and_ancestry_confirmation():
+    class Confirmed(FakeRun):
+        def __call__(self, argv, **kw):
+            self.calls.append((argv, kw.get("input")))
+            class P:
+                returncode = 0
+                stderr = ""
+                stdout = (
+                    '{"state":"MERGED","mergedAt":"2026-09-04T12:00:00Z",'
+                    '"mergeCommit":{"oid":"merge-sha"}}'
+                    if argv[:3] == ["gh", "pr", "view"]
+                    else "https://github.com/o/r/pull/9\n"
+                    if argv[:3] == ["gh", "pr", "create"]
+                    else ""
+                )
+            return P()
+
+    fake = Confirmed()
+    ref = open_draft("/repo", _artifacts(), sign=False, runner=fake)
+    fake.calls.clear()
+    result = finalize(
+        "/repo", ref, _artifacts(intended_base="base-sha"), runner=fake
+    )
+    assert result.merged is True and result.state == "merged"
+    assert any(argv[:4] == ["git", "merge-base", "--is-ancestor", "base-sha"]
+               for argv, _ in fake.calls)
+
+
+def test_finalize_blocks_bodyless_changes_requested_and_inline_thread():
+    fake = FakeRun()
+    ref = open_draft("/repo", ref_artifacts := _artifacts(), sign=False, runner=fake)
+    fake.calls.clear()
+    result = finalize(
+        "/repo", ref, ref_artifacts, runner=fake,
+        forge_feedback={
+            "reviewDecision": "CHANGES_REQUESTED",
+            "reviews": [{"state": "CHANGES_REQUESTED", "body": ""}],
+            "reviewThreads": [{"path": "src/x.py", "isResolved": False}],
+        },
+    )
+    assert result.state == "blocked" and not result.merged
+    assert not any(argv[:3] == ["gh", "pr", "merge"] for argv, _ in fake.calls)
 
 
 def test_finalize_never_auto_merges_yellow():
