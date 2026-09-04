@@ -28,22 +28,69 @@ STATE_FILE_NAME = "campaign-state.json"
 PATCH_ACTORS = {"manager", "item-worker", "builder", "worker"}
 ITEM_WORKER_ACTORS = {"item-worker", "builder", "worker"}
 ITEM_STATUSES = {
-    "pending", "running", "ready", "queued", "merged", "failed", "blocked",
+    "pending", "running", "draft", "ready", "queued", "merged", "failed", "blocked",
 }
+ITEM_PHASES = {
+    "pending", "local_branch", "remote_branch", "worktree", "draft", "ready", "queued",
+    "merged", "failed", "blocked",
+}
+PR_STATES = {"", "OPEN", "CLOSED", "MERGED"}
+MERGE_STATES = {"", "MERGED", "QUEUED", "PENDING", "OPEN", "CLEAN", "BEHIND",
+                "DIRTY", "CONFLICTING", "BLOCKED"}
 AMENDMENT_TYPES = {"local_deviation", "interface", "downstream", "goal", "scope"}
+ACTION_STATUSES = {"intent", "completed", "skipped", "failed"}
+PUBLICATION_CHECKPOINT_VERSION = 1
+PUBLICATION_TIERS = {"green", "yellow", "red"}
+LIFECYCLE_FIELDS = {
+    "phase", "automerge", "eligibility", "autonomy", "merge_method", "assignee",
+    "head_sha", "pr_number", "publication_checkpoint",
+}
 _IMMUTABLE_FIELDS = {
     "version", "campaign", "campaign_id", "plan_id", "plan_identity", "original_plan",
     "base_sha", "revision", "plan",
 }
-_MANAGER_FIELDS = {"locked_interfaces", "decisions", "blockers", "amendments"}
+_MANAGER_FIELDS = {"locked_interfaces", "decisions", "blockers", "amendments",
+                   "external_actions", "reconciliation"}
 _ITEM_FIELDS = {"latest_observation", "latest_observations", "observation", "deviation"}
 _ITEM_STATE_FIELDS = {
     "status", "attempts", "criterion_evidence", "deviations", "last_error", "branch",
     "worktree", "pr_url", "merged", "changed_files", "schedule_revision",
+    # Read-only forge/workspace projection used during restart reconciliation.  These values are
+    # manager-owned and never treated as acceptance evidence by themselves.
+    "phase", "pr_number", "base_sha", "head_sha", "pr_state", "checks", "check_head_sha",
+    "merge_state", "merge_commit", "merged_at", "forge",
+    "lifecycle",
 }
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 _UNSET = object()
+
+
+def stable_action_key(campaign_id: str, item_id: str, action: str, payload: Any = None) -> str:
+    """Return a deterministic idempotency key for one externally visible action.
+
+    Campaign and item identities are immutable. A payload digest is included only when supplied
+    (for example, a particular review comment), so retries after a restart produce the same key
+    while distinct comments/revisions remain distinct actions.
+    """
+    if not isinstance(campaign_id, str) or not campaign_id.strip():
+        raise StateSchemaError("campaign_id is required for an action key")
+    if not isinstance(item_id, str) or not item_id.strip():
+        raise StateSchemaError("item_id is required for an action key")
+    if not isinstance(action, str) or not action.strip():
+        raise StateSchemaError("action is required for an action key")
+    identity = {
+        "campaign_id": campaign_id.strip(),
+        "item_id": item_id.strip(),
+        "action": action.strip(),
+    }
+    if payload is not None:
+        identity["payload"] = _json(payload)
+    return "implement-action-" + _digest(identity)[:32]
+
+
+action_key = stable_action_key
+idempotency_key = stable_action_key
 
 
 class CampaignStateError(RuntimeError):
@@ -117,6 +164,131 @@ def _str(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise StateSchemaError(f"{field_name} must be a non-empty string")
     return value.strip()
+
+
+def validate_publication_checkpoint(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the durable pre-PR publication checkpoint.
+
+    This is intentionally separate from the item-state validator: the checkpoint is a serialized
+    boundary contract that must be complete before a forge object is created and must be sufficient
+    to replay finalization after a process crash without invoking a Builder again.
+    """
+    if not isinstance(checkpoint, Mapping):
+        raise StateSchemaError("publication checkpoint must be a mapping")
+    value = _json(dict(checkpoint))
+    required = {
+        "schema_version", "branch", "worktree", "title", "goal", "consensus_notes",
+        "base_sha", "intended_base", "pr_base", "head_sha", "pushed_head_sha",
+        "pr_number", "pr_url", "acceptance_k", "acceptance_n", "acceptance_ids",
+        "acceptance_evidence", "regate", "tier", "eligibility", "review", "trace",
+        "stacked_on", "autonomy", "merge_method", "assignee", "protected_oracle_paths",
+        "changed_files", "open_action_key", "pr_body",
+    }
+    missing = required - set(value)
+    if missing:
+        raise StateSchemaError(
+            f"publication checkpoint missing required fields: {sorted(missing)}"
+        )
+    extra = set(value) - required
+    if extra:
+        raise StateSchemaError(
+            f"publication checkpoint has unknown fields: {sorted(extra)}"
+        )
+    if value["schema_version"] != PUBLICATION_CHECKPOINT_VERSION:
+        raise StateSchemaError("unsupported publication checkpoint version")
+    for field_name in (
+            "branch", "worktree", "title", "goal", "consensus_notes", "base_sha",
+            "intended_base", "pr_base", "head_sha", "pushed_head_sha", "pr_url",
+            "stacked_on", "autonomy", "merge_method", "assignee", "open_action_key",
+            "pr_body"):
+        if not isinstance(value[field_name], str):
+            raise StateSchemaError(f"publication checkpoint {field_name} must be a string")
+    if value["pr_number"] is not None and (
+            not isinstance(value["pr_number"], int)
+            or isinstance(value["pr_number"], bool)
+            or value["pr_number"] <= 0):
+        raise StateSchemaError("publication checkpoint pr_number must be a positive integer or null")
+    for field_name in ("acceptance_k", "acceptance_n"):
+        if (not isinstance(value[field_name], int) or isinstance(value[field_name], bool)
+                or value[field_name] < 0):
+            raise StateSchemaError(
+                f"publication checkpoint {field_name} must be a non-negative integer"
+            )
+    ids = value["acceptance_ids"]
+    evidence = value["acceptance_evidence"]
+    if (not isinstance(ids, list)
+            or any(not isinstance(item_id, str) or not item_id.strip() for item_id in ids)
+            or len(set(ids)) != len(ids)):
+        raise StateSchemaError("publication checkpoint acceptance_ids must be unique strings")
+    if not isinstance(evidence, Mapping) or set(evidence) != set(ids):
+        raise StateSchemaError(
+            "publication checkpoint acceptance_evidence must cover acceptance_ids exactly"
+        )
+    if any(value is not True and value is not False and value is not None
+           for value in evidence.values()):
+        raise StateSchemaError("publication checkpoint acceptance evidence values are invalid")
+    if value["acceptance_n"] != len(ids) or value["acceptance_k"] != sum(
+            evidence[item_id] is True for item_id in ids):
+        raise StateSchemaError("publication checkpoint acceptance counts are inconsistent")
+    if not isinstance(value["regate"], bool):
+        raise StateSchemaError("publication checkpoint regate must be a boolean")
+    if value["tier"] not in PUBLICATION_TIERS:
+        raise StateSchemaError("publication checkpoint tier is invalid")
+    eligibility = value["eligibility"]
+    if not isinstance(eligibility, Mapping):
+        raise StateSchemaError("publication checkpoint eligibility must be a mapping")
+    eligibility_required = {
+        "tier", "criterion_evidence", "criterion_evidence_complete", "regate",
+        "review_blockers", "escalations", "auto_merge_policy", "eligible",
+    }
+    missing = eligibility_required - set(eligibility)
+    if missing:
+        raise StateSchemaError(
+            f"publication checkpoint eligibility missing fields: {sorted(missing)}"
+        )
+    if eligibility["tier"] != value["tier"]:
+        raise StateSchemaError("publication checkpoint eligibility tier is inconsistent")
+    if eligibility["criterion_evidence"] != evidence:
+        raise StateSchemaError("publication checkpoint eligibility evidence is inconsistent")
+    for field_name in ("criterion_evidence_complete", "regate", "auto_merge_policy", "eligible"):
+        if not isinstance(eligibility[field_name], bool):
+            raise StateSchemaError(
+                f"publication checkpoint eligibility {field_name} must be a boolean"
+            )
+    if not isinstance(eligibility["review_blockers"], list) or not isinstance(
+            eligibility["escalations"], list):
+        raise StateSchemaError("publication checkpoint review findings must be lists")
+    review = value["review"]
+    if not isinstance(review, Mapping) or not isinstance(review.get("rendering"), str):
+        raise StateSchemaError(
+            "publication checkpoint review must contain serialized rendering"
+        )
+    if not isinstance(review.get("decision"), str) or not review["decision"].strip():
+        raise StateSchemaError("publication checkpoint review decision is required")
+    if not isinstance(value["trace"], Mapping):
+        raise StateSchemaError("publication checkpoint trace must be a mapping")
+    for field_name in ("protected_oracle_paths", "changed_files"):
+        rows = value[field_name]
+        if not isinstance(rows, list) or any(not isinstance(item, str) for item in rows):
+            raise StateSchemaError(
+                f"publication checkpoint {field_name} must be a list of strings"
+            )
+    # Green is deliberately derived from complete, non-vacuous criterion evidence plus a clean
+    # review and re-gate.  A caller cannot mark an incomplete or contradictory checkpoint eligible.
+    criterion_complete = (
+        value["acceptance_n"] > 0
+        and len(evidence) == value["acceptance_n"]
+        and all(evidence[item_id] is True for item_id in ids)
+    )
+    review_clean = not eligibility["review_blockers"] and not eligibility["escalations"]
+    green = value["tier"] == "green" and value["regate"] and criterion_complete and review_clean
+    if eligibility["criterion_evidence_complete"] != criterion_complete:
+        raise StateSchemaError("publication checkpoint evidence completeness is inconsistent")
+    if eligibility["regate"] != value["regate"]:
+        raise StateSchemaError("publication checkpoint regate eligibility is inconsistent")
+    if eligibility["eligible"] != (eligibility["auto_merge_policy"] and green):
+        raise StateSchemaError("publication checkpoint merge eligibility is inconsistent")
+    return value
 
 
 def _plan_item(item: Any, index: int = 0) -> dict[str, Any]:
@@ -259,7 +431,12 @@ def _validate_dag(items: Sequence[Mapping[str, Any]]) -> None:
 
 
 def _empty_item_state() -> dict[str, Any]:
-    return {"status": "pending", "attempts": 0, "criterion_evidence": {}, "deviations": []}
+    return {
+        "status": "pending", "attempts": 0, "criterion_evidence": {}, "deviations": [],
+        "phase": "pending", "pr_number": None, "base_sha": "", "head_sha": "",
+        "pr_state": "", "checks": [], "check_head_sha": "", "merge_state": "",
+        "merge_commit": "", "merged_at": "", "forge": {}, "lifecycle": {},
+    }
 
 
 def new_state(plan: Any, base_sha: str, *, campaign_id: str | None = None,
@@ -299,6 +476,10 @@ def new_state(plan: Any, base_sha: str, *, campaign_id: str | None = None,
         "blockers": [],
         "latest_observations": {item_id: None for item_id in ids},
         "amendments": [],
+        # External actions are intent/completion records, not an in-memory deduplication cache.
+        # They survive crashes and are reconciled against the forge before being retried.
+        "external_actions": {},
+        "reconciliation": {},
     }
     return validate_state(state)
 
@@ -311,10 +492,17 @@ def validate_state(state: Mapping[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(state, Mapping):
         raise StateSchemaError("state must be a mapping")
+    # Item 7 state files predate the restart projection.  Add only the additive fields here so an
+    # interrupted campaign can be resumed without rewriting or trusting an unvalidated state.
+    detached_state: dict[str, Any] = copy.deepcopy(dict(state))
+    detached_state.setdefault("external_actions", {})
+    detached_state.setdefault("reconciliation", {})
+    state = detached_state
     required = {
         "version", "campaign_id", "plan_id", "campaign", "plan", "plan_identity",
         "original_plan", "revision", "base_sha", "item_states", "criterion_evidence",
         "locked_interfaces", "decisions", "blockers", "latest_observations", "amendments",
+        "external_actions", "reconciliation",
     }
     missing = required - set(state)
     if missing:
@@ -351,11 +539,13 @@ def validate_state(state: Mapping[str, Any]) -> dict[str, Any]:
             raise StateSchemaError(f"{name}.items must be a list")
         _validate_dag(candidate["items"])
     ids = {str(item["id"]) for item in plan["items"]}
-    item_states = state["item_states"]
+    item_states_value = state["item_states"]
     criterion_evidence = state["criterion_evidence"]
     observations = state["latest_observations"]
-    if not isinstance(item_states, Mapping) or set(item_states) != ids:
+    if not isinstance(item_states_value, Mapping) or set(item_states_value) != ids:
         raise StateSchemaError("item_states must cover exactly the active Plan items")
+    item_states = dict(item_states_value)
+    detached_state["item_states"] = item_states
     if not isinstance(criterion_evidence, Mapping) or set(criterion_evidence) != ids:
         raise StateSchemaError("criterion_evidence must cover exactly the active Plan items")
     if not isinstance(observations, Mapping) or set(observations) != ids:
@@ -363,10 +553,19 @@ def validate_state(state: Mapping[str, Any]) -> dict[str, Any]:
     for item_id, item_state in item_states.items():
         if not isinstance(item_state, Mapping):
             raise StateSchemaError(f"item state {item_id!r} must be a mapping")
+        # Normalize legacy item records only for additive lifecycle fields.  The resulting detached
+        # value is what callers receive and is still validated below.
+        item_state = dict(item_state)
+        for key, value in _empty_item_state().items():
+            item_state.setdefault(key, copy.deepcopy(value))
+        item_states[item_id] = item_state
         _validate_manager_item_update(item_state)
         status = item_state.get("status")
         if status not in ITEM_STATUSES:
             raise StateSchemaError(f"unknown status for {item_id!r}: {status!r}")
+        phase = item_state.get("phase")
+        if phase not in ITEM_PHASES:
+            raise StateSchemaError(f"unknown phase for {item_id!r}: {phase!r}")
         attempts = item_state.get("attempts", 0)
         if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
             raise StateSchemaError(f"attempts for {item_id!r} must be a non-negative integer")
@@ -378,9 +577,15 @@ def validate_state(state: Mapping[str, Any]) -> dict[str, Any]:
             )
         if not isinstance(item_state.get("deviations", []), list):
             raise StateSchemaError(f"deviations for {item_id!r} must be a list")
-        for field_name in ("branch", "worktree", "pr_url", "last_error"):
+        for field_name in (
+                "branch", "worktree", "pr_url", "last_error", "base_sha", "head_sha",
+                "pr_state", "check_head_sha", "merge_state", "merge_commit", "merged_at"):
             if field_name in item_state and not isinstance(item_state[field_name], str):
                 raise StateSchemaError(f"{field_name} for {item_id!r} must be a string")
+        if item_state.get("pr_state", "").upper() not in PR_STATES:
+            raise StateSchemaError(f"unknown PR state for {item_id!r}")
+        if item_state.get("merge_state", "").upper() not in MERGE_STATES:
+            raise StateSchemaError(f"unknown merge state for {item_id!r}")
         if "merged" in item_state and not isinstance(item_state["merged"], bool):
             raise StateSchemaError(f"merged for {item_id!r} must be a boolean")
         if "changed_files" in item_state:
@@ -388,6 +593,84 @@ def validate_state(state: Mapping[str, Any]) -> dict[str, Any]:
             if (not isinstance(changed_files, list)
                     or any(not isinstance(path, str) for path in changed_files)):
                 raise StateSchemaError(f"changed_files for {item_id!r} must be a list of strings")
+        if "pr_number" in item_state and item_state["pr_number"] is not None:
+            if (not isinstance(item_state["pr_number"], int)
+                    or isinstance(item_state["pr_number"], bool)
+                    or item_state["pr_number"] <= 0):
+                raise StateSchemaError(f"pr_number for {item_id!r} must be a positive integer or null")
+        if "checks" in item_state and not isinstance(item_state["checks"], list):
+            raise StateSchemaError(f"checks for {item_id!r} must be a list")
+        if any(not isinstance(row, Mapping) for row in item_state.get("checks", [])):
+            raise StateSchemaError(f"checks for {item_id!r} must contain mappings")
+        for check in item_state.get("checks", []):
+            check_head = str(check.get("headRefOid") or check.get("headSha") or "").strip()
+            if check_head and check_head != item_state.get("head_sha", ""):
+                raise StateSchemaError(
+                    f"check row for {item_id!r} is tied to a different head revision"
+                )
+        if item_state.get("checks") and (
+                not item_state.get("check_head_sha")
+                or item_state.get("check_head_sha") != item_state.get("head_sha")):
+            raise StateSchemaError(
+                f"checks for {item_id!r} are not tied to the recorded head revision"
+            )
+        if "forge" in item_state and not isinstance(item_state["forge"], Mapping):
+            raise StateSchemaError(f"forge projection for {item_id!r} must be a mapping")
+        if "lifecycle" in item_state and not isinstance(item_state["lifecycle"], Mapping):
+            raise StateSchemaError(f"lifecycle projection for {item_id!r} must be a mapping")
+        lifecycle = item_state.get("lifecycle", {})
+        lifecycle_unknown = set(lifecycle) - LIFECYCLE_FIELDS
+        if lifecycle_unknown:
+            raise StateSchemaError(
+                f"lifecycle projection for {item_id!r} has unknown fields: "
+                f"{sorted(lifecycle_unknown)}"
+            )
+        if "phase" in lifecycle and not isinstance(lifecycle["phase"], str):
+            raise StateSchemaError(f"lifecycle phase for {item_id!r} must be a string")
+        if "automerge" in lifecycle and not isinstance(lifecycle["automerge"], bool):
+            raise StateSchemaError(f"lifecycle automerge for {item_id!r} must be a boolean")
+        for field_name in ("autonomy", "merge_method", "assignee", "head_sha"):
+            if field_name in lifecycle and not isinstance(lifecycle[field_name], str):
+                raise StateSchemaError(f"lifecycle {field_name} for {item_id!r} must be a string")
+        if "pr_number" in lifecycle and lifecycle["pr_number"] is not None and (
+                not isinstance(lifecycle["pr_number"], int)
+                or isinstance(lifecycle["pr_number"], bool)
+                or lifecycle["pr_number"] <= 0):
+            raise StateSchemaError(
+                f"lifecycle pr_number for {item_id!r} must be a positive integer or null"
+            )
+        if "eligibility" in lifecycle and not isinstance(lifecycle["eligibility"], Mapping):
+            raise StateSchemaError(f"lifecycle eligibility for {item_id!r} must be a mapping")
+        if "publication_checkpoint" in lifecycle:
+            checkpoint = validate_publication_checkpoint(lifecycle["publication_checkpoint"])
+            if "eligibility" in lifecycle and lifecycle["eligibility"] != checkpoint["eligibility"]:
+                raise StateSchemaError(
+                    f"lifecycle eligibility for {item_id!r} disagrees with publication checkpoint"
+                )
+            if "automerge" in lifecycle and lifecycle["automerge"] != checkpoint["eligibility"]["eligible"]:
+                raise StateSchemaError(
+                    f"lifecycle automerge for {item_id!r} disagrees with publication checkpoint"
+                )
+            if "head_sha" in lifecycle and lifecycle["head_sha"] != checkpoint["head_sha"]:
+                raise StateSchemaError(
+                    f"lifecycle head_sha for {item_id!r} disagrees with publication checkpoint"
+                )
+            if "pr_number" in lifecycle and lifecycle["pr_number"] != checkpoint["pr_number"]:
+                raise StateSchemaError(
+                    f"lifecycle pr_number for {item_id!r} disagrees with publication checkpoint"
+                )
+        has_merge_evidence = bool(
+            item_state.get("merge_state", "").upper() == "MERGED"
+            and item_state.get("merge_commit", "").strip()
+            and item_state.get("merged_at", "").strip()
+        )
+        if phase == "merged" and (not item_state.get("merged") or not has_merge_evidence):
+            raise StateSchemaError(f"merged phase for {item_id!r} lacks merge evidence")
+        if item_state.get("merged") is True and (
+                phase != "merged" or item_state.get("status") != "merged" or not has_merge_evidence):
+            raise StateSchemaError(f"merged state for {item_id!r} is incoherent")
+        if phase == "queued" and item_state.get("status") not in {"queued", "merged"}:
+            raise StateSchemaError(f"queued phase for {item_id!r} has incoherent status")
         if "schedule_revision" in item_state:
             schedule_revision = item_state["schedule_revision"]
             if (not isinstance(schedule_revision, int)
@@ -402,6 +685,40 @@ def validate_state(state: Mapping[str, Any]) -> dict[str, Any]:
         raise StateSchemaError("latest observations must be mappings or null")
     if not isinstance(state["locked_interfaces"], Mapping):
         raise StateSchemaError("locked_interfaces must be a mapping")
+    actions = state["external_actions"]
+    if not isinstance(actions, Mapping):
+        raise StateSchemaError("external_actions must be a mapping")
+    for key, action in actions.items():
+        if not isinstance(key, str) or not key.strip() or not isinstance(action, Mapping):
+            raise StateSchemaError("external action records must be keyed mappings")
+        if action.get("key", key) != key:
+            raise StateSchemaError(f"external action key mismatch for {key!r}")
+        if action.get("status") not in ACTION_STATUSES:
+            raise StateSchemaError(f"unknown external action status for {key!r}")
+        if not isinstance(action.get("action"), str) or not action["action"].strip():
+            raise StateSchemaError(f"external action {key!r} has no action name")
+        if not isinstance(action.get("item_id"), str) or action["item_id"] not in ids:
+            raise StateSchemaError(f"external action {key!r} has unknown item")
+        if not isinstance(action.get("payload_digest", ""), str):
+            raise StateSchemaError(f"external action {key!r} payload digest must be a string")
+        if "payload" not in action:
+            raise StateSchemaError(f"external action {key!r} is missing its payload")
+        payload = action["payload"]
+        expected_key = stable_action_key(
+            state["campaign_id"], action["item_id"], action["action"], payload,
+        )
+        if key != expected_key:
+            raise StateSchemaError(
+                f"external action {key!r} is not the deterministic action key"
+            )
+        expected_digest = _digest(_json(payload)) if payload is not None else ""
+        if action.get("payload_digest", "") != expected_digest:
+            raise StateSchemaError(f"external action {key!r} payload digest is inconsistent")
+        attempts = action.get("attempts", 0)
+        if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+            raise StateSchemaError(f"external action {key!r} attempts must be a non-negative integer")
+    if not isinstance(state["reconciliation"], Mapping):
+        raise StateSchemaError("reconciliation must be a mapping")
     for field_name in ("decisions", "blockers", "amendments"):
         if not isinstance(state[field_name], list):
             raise StateSchemaError(f"{field_name} must be a list")
@@ -670,9 +987,9 @@ def _manager_changes(state: dict[str, Any], changes: Mapping[str, Any]) -> None:
     for field_name in _MANAGER_FIELDS:
         if field_name in changes:
             value = changes[field_name]
-            if field_name == "locked_interfaces":
+            if field_name in {"locked_interfaces", "external_actions", "reconciliation"}:
                 if not isinstance(value, Mapping):
-                    raise StateSchemaError("locked_interfaces must be a mapping")
+                    raise StateSchemaError(f"{field_name} must be a mapping")
                 state[field_name] = _merge(state[field_name], value)
             elif not isinstance(value, list):
                 raise StateSchemaError(f"{field_name} must be a list")
@@ -710,6 +1027,278 @@ def commit_patch(path_or_repo: str | os.PathLike[str],
         return updated
 
 
+def _action_record(state: Mapping[str, Any], key: str) -> dict[str, Any] | None:
+    record = state.get("external_actions", {}).get(key)
+    if not isinstance(record, Mapping):
+        return None
+    return dict(copy.deepcopy(record))
+
+
+def begin_action(
+        state: Mapping[str, Any], item_id: str, action: str, *, payload: Any = None,
+        key: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Purely register an external-action intent.
+
+    The returned boolean is ``True`` when an already-completed action may be skipped.  An intent
+    is deliberately not treated as completion: after a crash, the coordinator must reconcile the
+    forge marker/resource before deciding whether to retry it.
+    """
+    current = validate_state(state)
+    if item_id not in current["item_states"]:
+        raise StateSchemaError(f"unknown action item: {item_id!r}")
+    action = _str(action, "action")
+    deterministic_key = stable_action_key(current["campaign_id"], item_id, action, payload)
+    if key is not None and key != deterministic_key:
+        raise StateSchemaError(
+            f"idempotency key {key!r} does not match the deterministic action key"
+        )
+    resolved_key = deterministic_key
+    existing = _action_record(current, resolved_key)
+    if existing is not None:
+        expected_digest = _digest(_json(payload)) if payload is not None else ""
+        if (existing.get("item_id") != item_id or existing.get("action") != action
+                or existing.get("payload_digest", "") != expected_digest):
+            raise StateSchemaError(
+                f"idempotency key {resolved_key!r} is already bound to a different action"
+            )
+        if existing.get("status") in {"failed", "skipped"}:
+            retry = dict(existing)
+            retry["status"] = "intent"
+            retry["attempts"] = int(retry.get("attempts", 0)) + 1
+            retry["result"] = None
+            current["external_actions"][resolved_key] = retry
+            current["revision"] += 1
+            return validate_state(current), copy.deepcopy(retry), False
+        return current, existing, existing.get("status") == "completed"
+    record = {
+        "key": resolved_key,
+        "item_id": item_id,
+        "action": action,
+        "status": "intent",
+        "payload_digest": _digest(_json(payload)) if payload is not None else "",
+        "payload": _json(payload) if payload is not None else None,
+        "attempts": 1,
+        "result": None,
+    }
+    current["external_actions"][resolved_key] = record
+    current["revision"] += 1
+    return validate_state(current), copy.deepcopy(record), False
+
+
+def complete_action(
+        state: Mapping[str, Any], key: str, *, result: Any = None,
+        status: str = "completed",
+) -> dict[str, Any]:
+    """Purely complete an action intent after its external result is observed."""
+    current = validate_state(state)
+    if status not in ACTION_STATUSES or status == "intent":
+        raise StateSchemaError(f"invalid completed action status: {status!r}")
+    record = current["external_actions"].get(key)
+    if not isinstance(record, Mapping):
+        raise StateSchemaError(f"unknown external action key: {key!r}")
+    record = dict(record)
+    if record.get("status") == "completed":
+        previous = record.get("result")
+        next_result = _json(result) if result is not None else None
+        if result is not None and previous is not None and previous != next_result:
+            raise StateSchemaError(f"completed idempotency key {key!r} has a different result")
+        return current
+    record["status"] = status
+    record["result"] = _json(result) if result is not None else None
+    current["external_actions"][key] = record
+    current["revision"] += 1
+    return validate_state(current)
+
+
+def commit_action(
+        path_or_repo: str | os.PathLike[str], item_id: str, action: str, *, payload: Any = None,
+        key: str | None = None, home=None,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Persist an action intent under the state lock and return its durable record."""
+    path = _state_path(path_or_repo, home)
+    with _state_lock(path):
+        current = load_state(path)
+        updated, record, skip = begin_action(current, item_id, action, payload=payload, key=key)
+        if updated["revision"] != current["revision"]:
+            write_state(path, updated)
+        return updated, record, skip
+
+
+def finish_action(
+        path_or_repo: str | os.PathLike[str], key: str, *, result: Any = None,
+        status: str = "completed", home=None,
+) -> dict[str, Any]:
+    """Persist the observed external action result under the state lock."""
+    path = _state_path(path_or_repo, home)
+    with _state_lock(path):
+        current = load_state(path)
+        updated = complete_action(current, key, result=result, status=status)
+        write_state(path, updated)
+        return updated
+
+
+def reconcile_state(state: Mapping[str, Any], facts: Mapping[str, Any]) -> dict[str, Any]:
+    """Project read-only forge/worktree facts into canonical state deterministically.
+
+    Facts are observations, never acceptance evidence.  A merge is considered confirmed only when
+    the reconciler is explicitly given ``merged=True`` plus forge state/timestamp/commit evidence;
+    a queued merge request therefore remains ``queued``.
+    """
+    current = validate_state(state)
+    if not isinstance(facts, Mapping):
+        raise StateSchemaError("reconciliation facts must be a mapping")
+    canonical = facts.get("canonical")
+    if not isinstance(canonical, Mapping):
+        raise StateSchemaError("reconciliation facts require canonical identity")
+    for field_name in ("campaign_id", "plan_id", "base_sha", "revision"):
+        if field_name not in canonical or canonical[field_name] != current[field_name]:
+            if field_name == "revision":
+                raise RevisionConflict(
+                    "stale reconciliation facts: canonical revision does not match state"
+                )
+            raise StateSchemaError(
+                f"reconciliation canonical {field_name} does not match state"
+            )
+    updated = copy.deepcopy(current)
+    item_facts = facts.get("items", facts.get("item_facts", {}))
+    if not isinstance(item_facts, Mapping):
+        raise StateSchemaError("reconciliation item facts must be a mapping")
+    for item_id, raw in item_facts.items():
+        if item_id not in updated["item_states"]:
+            raise StateSchemaError(f"reconciliation contains unknown item: {item_id!r}")
+        if not isinstance(raw, Mapping):
+            raise StateSchemaError(f"reconciliation facts for {item_id!r} must be a mapping")
+        fact = _json(dict(raw))
+        item = updated["item_states"][item_id]
+        # Copy only the known external projection fields.  No forge observation can overwrite
+        # criterion evidence, deviations, or the immutable Plan.
+        for field_name in (
+                "branch", "worktree", "pr_url", "pr_number", "base_sha", "head_sha",
+                "pr_state", "checks", "check_head_sha", "merge_state", "merge_commit",
+                "merged_at", "forge", "phase", "lifecycle"):
+            if field_name in fact:
+                item[field_name] = copy.deepcopy(fact[field_name])
+        merge_confirmed = bool(fact.get("merged") is True
+                               and str(fact.get("merge_state", "")).upper() == "MERGED"
+                               and str(fact.get("merged_at", "")).strip()
+                               and str(fact.get("merge_commit", "")).strip())
+        if merge_confirmed:
+            item["status"], item["merged"], item["phase"] = "merged", True, "merged"
+        elif str(fact.get("merge_state", "")).upper() in {"QUEUED", "PENDING"}:
+            item["status"], item["merged"], item["phase"] = "queued", False, "queued"
+        elif fact.get("phase") in {"ready", "failed", "blocked"}:
+            item["status"], item["merged"] = fact["phase"], False
+        elif fact.get("phase") == "draft":
+            item["status"], item["merged"], item["phase"] = "draft", False, "draft"
+        elif fact.get("pr_url") and item.get("status") in {"pending", "running"}:
+            item["status"], item["phase"] = "running", "draft"
+        elif (fact.get("merged") is False
+              and str(fact.get("merge_state") or "").strip()
+              and str(fact.get("pr_state") or "").strip()
+              and isinstance(fact.get("forge"), Mapping) and bool(fact.get("forge"))
+              and (
+                item.get("status") == "merged" or item.get("merged") is True)):
+            # A prior optimistic record cannot keep a terminal merge state once the forge read
+            # fails to confirm it. Partial observations never demote a confirmed merge; only an
+            # explicit contradictory full forge observation can do so.
+            item["status"], item["merged"] = "pending", False
+        if item.get("merged") is True:
+            item["status"], item["phase"] = "merged", "merged"
+        updated["latest_observations"][item_id] = {
+            "phase": "reconciled", "facts": fact,
+        }
+    if "actions" in facts:
+        actions = facts["actions"]
+        if not isinstance(actions, Mapping):
+            raise StateSchemaError("reconciliation actions must be a mapping")
+        for key, result in actions.items():
+            if key not in updated["external_actions"]:
+                raise StateSchemaError(f"reconciliation contains unknown action key: {key!r}")
+            record = updated["external_actions"].get(key)
+            if isinstance(record, Mapping) and isinstance(result, Mapping) and result.get("observed") is True:
+                copy_record = dict(record)
+                copy_record["status"] = "completed"
+                copy_record["result"] = _json(result.get("result"))
+                updated["external_actions"][key] = copy_record
+    updated["reconciliation"] = _json(dict(facts))
+    if updated == current:
+        return current
+    updated["revision"] += 1
+    return validate_state(updated)
+
+
+def commit_reconciliation(path_or_repo: str | os.PathLike[str], facts: Mapping[str, Any], *, home=None,
+                          expected_revision: int | None = None) -> dict[str, Any]:
+    """Persist one deterministic read-only reconciliation projection."""
+    path = _state_path(path_or_repo, home)
+    with _state_lock(path):
+        current = load_state(path)
+        canonical = facts.get("canonical") if isinstance(facts, Mapping) else None
+        observed_revision = canonical.get("revision") if isinstance(canonical, Mapping) else None
+        expected = observed_revision if expected_revision is None else expected_revision
+        if expected != current["revision"]:
+            raise RevisionConflict(
+                f"stale reconciliation commit: expected revision {expected}, current {current['revision']}"
+            )
+        updated = reconcile_state(current, facts)
+        if updated != current:
+            write_state(path, updated)
+        return updated
+
+
+def validate_scout_proposal(
+        state: Mapping[str, Any], proposal: Mapping[str, Any], *, item_id: str | None = None,
+) -> dict[str, Any]:
+    """Validate a historical-scout proposal without changing canonical state.
+
+    Scout output is deliberately translated into the existing item-worker patch envelope and
+    passed through the ordinary schema/authorization path on a detached copy.  Only a manager may
+    later commit the returned changes; this function itself has no write side effect.
+    """
+    current = validate_state(state)
+    if not isinstance(proposal, Mapping):
+        raise StateSchemaError("scout proposal must be a mapping")
+    target = proposal.get("item_id", item_id)
+    if not isinstance(target, str) or target not in current["item_states"]:
+        raise PatchAuthorizationError("scout proposal requires a known item_id")
+    required_binding = {"expected_revision", "source_revision", "source_plan_digest"}
+    missing = required_binding - set(proposal)
+    if missing:
+        raise RevisionConflict(
+            f"scout proposal is missing revision binding: {sorted(missing)}"
+        )
+    expected = proposal["expected_revision"]
+    if expected != current["revision"]:
+        raise RevisionConflict(
+            f"stale scout proposal: expected revision {expected}, current {current['revision']}"
+        )
+    if proposal["source_revision"] != current["revision"]:
+        raise RevisionConflict("scout proposal is not bound to the current state revision")
+    if proposal["source_plan_digest"] != _active_plan_digest(current):
+        raise RevisionConflict("scout proposal is not bound to the current Plan revision")
+    changes = proposal.get("changes", proposal.get("patch", {}))
+    if not isinstance(changes, Mapping) or not changes:
+        raise StateSchemaError("scout proposal changes must be a non-empty mapping")
+    if set(changes) - _ITEM_FIELDS:
+        raise PatchAuthorizationError("scout proposals may only update one item observation/deviation")
+    detached = apply_patch(
+        current,
+        StatePatch(current["revision"], dict(changes), actor="builder", item_id=target),
+    )
+    return {
+        "type": "scout_proposal", "item_id": target,
+        "expected_revision": current["revision"], "changes": _json(dict(changes)),
+        "validated_revision": detached["revision"],
+        "source_revision": current["revision"],
+        "source_plan_digest": _active_plan_digest(current),
+        "rationale": str(proposal.get("rationale", "")),
+    }
+
+
+propose_scout_state = validate_scout_proposal
+
+
 def _projection_items(state: Mapping[str, Any], item_id: str) -> dict[str, Any]:
     if item_id not in state["item_states"]:
         raise CampaignStateError(f"unknown Plan item: {item_id!r}")
@@ -735,6 +1324,9 @@ def _projection_items(state: Mapping[str, Any], item_id: str) -> dict[str, Any]:
                      or x.get("item_id") == item_id)]
     return {
         "immutable_spec": spec,
+        "campaign_id": state["campaign_id"],
+        "plan_id": state["plan_id"],
+        "base_sha": state["base_sha"],
         "revision": state["revision"],
         "item_id": item_id,
         "item_state": item_state,
@@ -747,11 +1339,42 @@ def _projection_items(state: Mapping[str, Any], item_id: str) -> dict[str, Any]:
 
 
 def project_worker_context(state_or_path: Mapping[str, Any] | str | os.PathLike[str], item_id: str,
-                           *, home=None) -> dict[str, Any]:
-    """Return the bounded Builder context; no transcript, event log, or git history is included."""
+                           *, home=None, budget: int | None = None) -> dict[str, Any]:
+    """Return the bounded Builder context; no transcript, event log, or git history is included.
+
+    ``budget`` is an explicit deterministic character ceiling for integrations that need to put a
+    hard bound on serialized context.  The default preserves the Item 7 projection exactly.
+    """
     state = (load_state(state_or_path, home=home)
              if not isinstance(state_or_path, Mapping) else validate_state(state_or_path))
-    return _projection_items(state, item_id)
+    projection = _projection_items(state, item_id)
+    if budget is None:
+        return projection
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 256:
+        raise StateSchemaError("worker context budget must be an integer >= 256")
+    encoded = _dump(projection)
+    if len(encoded) <= budget:
+        return projection
+    # Keep the immutable item spec/evidence and latest observation first; trim only explanatory
+    # decision/blocker text, never the structural identity or event history (which is absent).
+    bounded = copy.deepcopy(projection)
+    for field_name in ("decisions", "blockers", "locked_interfaces"):
+        bounded[field_name] = []
+        if len(_dump(bounded)) <= budget:
+            return bounded
+    # A pathological immutable Plan/spec cannot be made safe by replacing its fields with a
+    # context_error. Fail closed instead of handing a Builder an incomplete item state/evidence
+    # projection.
+    minimum = {
+        field_name: copy.deepcopy(projection[field_name])
+        for field_name in (
+            "immutable_spec", "campaign_id", "plan_id", "base_sha", "revision", "item_id",
+            "item_state", "criterion_evidence", "latest_observation",
+        )
+    }
+    if len(_dump(minimum)) > budget:
+        raise StateSchemaError("immutable worker projection exceeds context budget")
+    return minimum
 
 
 # Short aliases make the boundary discoverable for callers that use "projection" terminology.
@@ -1240,6 +1863,27 @@ class CampaignStateStore:
         return commit_amendment(self.path, amendment, **kwargs)
 
     apply_amendment = amendment
+
+    def action_key(self, item_id: str, action: str, payload: Any = None) -> str:
+        state = self.read()
+        return stable_action_key(state["campaign_id"], item_id, action, payload)
+
+    def begin_action(self, item_id: str, action: str, *, payload: Any = None,
+                     key: str | None = None) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        return commit_action(self.path, item_id, action, payload=payload, key=key)
+
+    def complete_action(self, key: str, *, result: Any = None,
+                        status: str = "completed") -> dict[str, Any]:
+        return finish_action(self.path, key, result=result, status=status)
+
+    def action(self, key: str) -> dict[str, Any] | None:
+        return _action_record(self.read(), key)
+
+    def reconcile(self, facts: Mapping[str, Any], *, expected_revision: int | None = None) -> dict[str, Any]:
+        return commit_reconciliation(self.path, facts, expected_revision=expected_revision)
+
+    def scout_proposal(self, proposal: Mapping[str, Any], *, item_id: str | None = None) -> dict[str, Any]:
+        return validate_scout_proposal(self.read(), proposal, item_id=item_id)
 
 
 def ensure_campaign_state(repo_path: str | os.PathLike[str], plan: Any, base_sha: str, *, home=None,

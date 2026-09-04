@@ -7,8 +7,11 @@ LLM/plan-derived branch or a crafted `pr` arg beginning with `-` can never be pa
 (argv option-injection). subprocess is always called with an argv list (no shell)."""
 import re
 import json
+import hashlib
 import subprocess
 import time
+import contextvars
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 
@@ -24,6 +27,13 @@ class PrRef:
     number: int
     url: str
     branch: str
+    # Additive forge metadata used by restart reconciliation. Existing positional callers only
+    # provide the first three fields.
+    head_sha: str = ""
+    base: str = ""
+    title: str = ""
+    state: str = ""
+    is_draft: bool = False
 
 
 @dataclass(frozen=True)
@@ -49,6 +59,69 @@ class MergeConfirmation:
 
 _REF_OK = re.compile(r"^[A-Za-z0-9._/-]+$")
 _PR_URL = re.compile(r"https?://\S+?/pull/(\d+)")
+_IDEMPOTENCY_MARKER = re.compile(r"<!--\s*implement-idempotency-key:([A-Za-z0-9._:-]+)\s*-->")
+_COMMENT_IDEMPOTENCY_KEY: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "implement_comment_idempotency_key", default=None,
+)
+_BOUNDARY_OBSERVER = contextvars.ContextVar("implement_boundary_observer", default=None)
+
+
+def idempotency_marker(key: str) -> str:
+    if not isinstance(key, str) or not key.strip() or not re.fullmatch(
+            r"[A-Za-z0-9._:-]+", key.strip()):
+        raise ForgeError(f"unsafe idempotency key: {key!r}")
+    return f"<!-- implement-idempotency-key:{key.strip()} -->"
+
+
+def marker_key(text) -> str:
+    match = _IDEMPOTENCY_MARKER.search(str(text or ""))
+    return match.group(1) if match else ""
+
+
+def _with_marker(body: str, key: str | None) -> str:
+    if key is None:
+        return body
+    marker = idempotency_marker(key)
+    found = marker_key(body)
+    if found and found != key:
+        raise ForgeError(f"body already carries a different idempotency key: {found!r}")
+    return body if found == key else f"{marker}\n{body}"
+
+
+@contextmanager
+def idempotency_scope(key: str | None, *, boundary=None):
+    """Temporarily bind an idempotency key for legacy publish helpers.
+
+    ``publish.finalize`` predates explicit key parameters and calls ``post_comment`` directly. The
+    scoped binding keeps that public helper compatible while allowing campaign restarts to recover
+    marker-bearing comments without changing the publish module's API.
+    """
+    if key is not None:
+        idempotency_marker(key)
+    token = _COMMENT_IDEMPOTENCY_KEY.set(key)
+    observer_token = _BOUNDARY_OBSERVER.set(boundary)
+    try:
+        yield
+    finally:
+        _COMMENT_IDEMPOTENCY_KEY.reset(token)
+        _BOUNDARY_OBSERVER.reset(observer_token)
+
+
+def _boundary_before(action: str, payload: dict) -> tuple[str | None, bool]:
+    observer = _BOUNDARY_OBSERVER.get()
+    if observer is None:
+        return None, False
+    result = observer("before", action, payload)
+    if not isinstance(result, tuple) or len(result) != 2:
+        raise ForgeError("invalid idempotency boundary observer result")
+    key, skip = result
+    return (str(key) if key else None), bool(skip)
+
+
+def _boundary_after(action: str, key: str | None, result) -> None:
+    observer = _BOUNDARY_OBSERVER.get()
+    if observer is not None and key is not None:
+        observer("after", action, {"key": key, "result": result})
 
 
 def _validate_ref(name: str, kind: str = "ref") -> str:
@@ -86,14 +159,70 @@ def commit_and_push(repo, branch, message, *, sign=True, checkout=True,
     return _run(["git", "rev-parse", "HEAD"], repo, runner).strip()
 
 
-def open_draft_pr(repo, *, branch, base, title, body, runner=subprocess.run) -> PrRef:
+def _pr_ref(row: dict) -> PrRef:
+    """Convert one forge inventory row while retaining the raw row for callers that need it."""
+    raw_number = row.get("number")
+    if isinstance(raw_number, bool) or not isinstance(raw_number, (int, str)):
+        raise ForgeError("forge PR inventory row has an invalid number")
+    return PrRef(
+        number=int(raw_number),
+        url=str(row.get("url") or ""),
+        branch=str(row.get("headRefName") or ""),
+        head_sha=str(row.get("headRefOid") or row.get("headSha") or ""),
+        base=str(row.get("baseRefName") or ""),
+        title=str(row.get("title") or ""),
+        state=str(row.get("state") or ""),
+        is_draft=bool(row.get("isDraft", False)),
+    )
+
+
+def open_draft_pr(repo, *, branch, base, title, body, idempotency_key=None,
+                  inventory=None, runner=subprocess.run) -> PrRef:
     _validate_ref(branch, "branch")
     _validate_ref(base, "base")
+    # PR creation is duplication-sensitive. A marker embedded in the body is an acceptable
+    # durable key for callers that are recovering an already-rendered draft, but an unmarked body
+    # must never reach ``gh pr create``: a retry could create a second PR.
+    idempotency_key = str(idempotency_key or marker_key(body) or "").strip()
+    if not idempotency_key:
+        raise ForgeError("open_draft_pr requires a non-empty idempotency key")
+    body = _with_marker(body, idempotency_key)
+    # Search all forge states: a crash can occur after creation but before the local action record
+    # is completed, and a later restart must recover a marker-bearing closed/merged PR instead of
+    # creating a duplicate. Callers can still inject the already-read inventory.
+    rows = list_prs(repo, state="all", runner=runner) if inventory is None else inventory
+    if not isinstance(rows, list):
+        raise ForgeError("PR inventory must be a list for idempotent publication")
+    matches = []
+    for row in rows:
+        if not isinstance(row, dict) or marker_key(row.get("body")) != idempotency_key:
+            continue
+        same_object = (
+            str(row.get("headRefName") or "") == branch
+            and str(row.get("baseRefName") or "") == base
+            and str(row.get("title") or "").strip() == str(title).strip()
+        )
+        if not same_object:
+            raise ForgeError(
+                f"idempotency key {idempotency_key!r} is bound to a different PR object"
+            )
+        try:
+            matches.append(_pr_ref(row))
+        except (TypeError, ValueError) as exc:
+            raise ForgeError("marker-bearing PR has invalid forge identity") from exc
+    if matches:
+        if len({ref.number for ref in matches}) > 1:
+            raise ForgeError(
+                f"idempotency key {idempotency_key!r} matches multiple PR objects"
+            )
+        return matches[0]
     out = _run(["gh", "pr", "create", "--draft", f"--base={base}", f"--head={branch}",
                 f"--title={title}", "--body-file=-"], repo, runner, stdin=body)
     m = _PR_URL.search(out)   # scan the whole stdout; the URL is not guaranteed to be the last line
     if not m:
         raise ForgeError(f"could not parse PR number from gh output: {out.strip()[:200]!r}")
+    # Preserve the long-standing three-field result for newly-created PRs. The forge inventory
+    # path above supplies additive head/base/title metadata on restart when available.
     return PrRef(number=int(m.group(1)), url=m.group(0), branch=branch)   # m.group(0) drops any ?query
 
 
@@ -106,16 +235,82 @@ def _pr_arg(pr) -> str:
     return s
 
 
-def post_comment(repo, pr, body, *, runner=subprocess.run) -> None:
+def pr_comments(repo, pr, *, runner=subprocess.run) -> list:
+    """Read PR comments for idempotency-marker recovery."""
+    out = _run(["gh", "pr", "view", _pr_arg(pr), "--json=comments"], repo, runner)
+    try:
+        data = json.loads(out or "{}")
+    except json.JSONDecodeError as exc:
+        raise ForgeError(f"could not parse PR comments: {exc}") from exc
+    comments = data.get("comments", []) if isinstance(data, dict) else []
+    return comments if isinstance(comments, list) else []
+
+
+def post_comment(repo, pr, body, *, idempotency_key=None, comments=None,
+                 runner=subprocess.run) -> None:
+    boundary_key, boundary_skip = _boundary_before(
+        "post_comment", {"pr": _pr_arg(pr), "body": str(body)},
+    )
+    if boundary_skip:
+        return None
+    if boundary_key is not None:
+        # The boundary observer owns the durable action key. Validate an explicitly supplied
+        # caller key, but use the observer's key for the marker so reconciliation and the external
+        # action ledger remain one-to-one even when a legacy caller supplies a child key.
+        if idempotency_key is not None:
+            idempotency_marker(str(idempotency_key).strip())
+        idempotency_key = boundary_key
+    elif idempotency_key is None:
+        idempotency_key = boundary_key
+        scope_key = _COMMENT_IDEMPOTENCY_KEY.get()
+        if idempotency_key is None and scope_key is not None:
+            # Legacy publish.finalize may emit both a review comment and a lifecycle blocker.
+            # Derive a stable per-body key so those externally visible actions cannot collide.
+            digest = hashlib.sha256(str(body).encode("utf-8")).hexdigest()[:16]
+            idempotency_key = f"{scope_key}-comment-{digest}"
+    # A comment is another duplication-sensitive create. A pre-existing marker may provide the
+    # effective key for a direct recovery call, while an ordinary unmarked body must fail closed.
+    idempotency_key = str(idempotency_key or marker_key(body) or "").strip()
+    if not idempotency_key:
+        raise ForgeError("post_comment requires a non-empty idempotency key")
+    body = _with_marker(body, idempotency_key)
+    rows = pr_comments(repo, pr, runner=runner) if comments is None else comments
+    if not isinstance(rows, list):
+        raise ForgeError("PR comment inventory must be a list for idempotent publication")
+    for row in rows:
+        if not isinstance(row, dict) or marker_key(row.get("body")) != idempotency_key:
+            continue
+        existing = str(row.get("body") or "")
+        if existing != body:
+            raise ForgeError(
+                f"idempotency key {idempotency_key!r} is bound to a different comment"
+            )
+        _boundary_after("post_comment", boundary_key, {"observed": True})
+        return None
     _run(["gh", "pr", "comment", _pr_arg(pr), "--body-file=-"], repo, runner, stdin=body)
+    _boundary_after("post_comment", boundary_key, {"observed": True})
 
 
-def mark_ready(repo, pr, *, runner=subprocess.run) -> None:
+def mark_ready(repo, pr, *, idempotency_key=None, runner=subprocess.run) -> None:
+    boundary_key, boundary_skip = _boundary_before(
+        "mark_ready", {"pr": _pr_arg(pr)},
+    )
+    if boundary_skip:
+        return None
     _run(["gh", "pr", "ready", _pr_arg(pr)], repo, runner)
+    _boundary_after("mark_ready", boundary_key or idempotency_key, {"observed": True})
 
 
-def update_body(repo, pr, body, *, runner=subprocess.run) -> None:
+def update_body(repo, pr, body, *, idempotency_key=None, runner=subprocess.run) -> None:
+    boundary_key, boundary_skip = _boundary_before(
+        "update_body", {"pr": _pr_arg(pr), "body": str(body)},
+    )
+    if boundary_skip:
+        return None
+    if idempotency_key is None:
+        idempotency_key = boundary_key
     _run(["gh", "pr", "edit", _pr_arg(pr), "--body-file=-"], repo, runner, stdin=body)
+    _boundary_after("update_body", idempotency_key, {"observed": True})
 
 
 def retarget_pr(repo, pr, base, *, runner=subprocess.run) -> None:
@@ -124,23 +319,40 @@ def retarget_pr(repo, pr, base, *, runner=subprocess.run) -> None:
     _run(["gh", "pr", "edit", _pr_arg(pr), f"--base={base}"], repo, runner)
 
 
-def assign_pr(repo, pr, assignee="@me", *, runner=subprocess.run) -> None:
+def assign_pr(repo, pr, assignee="@me", *, idempotency_key=None, runner=subprocess.run) -> None:
     if not assignee or str(assignee).startswith("-"):
         raise ForgeError(f"unsafe assignee: {assignee!r}")
+    boundary_key, boundary_skip = _boundary_before(
+        "assign_pr", {"pr": _pr_arg(pr), "assignee": str(assignee)},
+    )
+    if boundary_skip:
+        return None
     _run(["gh", "pr", "edit", _pr_arg(pr), f"--add-assignee={assignee}"], repo, runner)
+    _boundary_after("assign_pr", boundary_key or idempotency_key, {"observed": True})
 
 
-def list_open_prs(repo, *, runner=subprocess.run) -> list:
+def list_prs(repo, *, state="open", runner=subprocess.run) -> list:
+    if state not in {"open", "closed", "all"}:
+        raise ForgeError(f"unknown PR inventory state: {state!r}")
     out = _run(
-        ["gh", "pr", "list", "--state=open",
-         "--json=number,title,url,headRefName,baseRefName"],
+        ["gh", "pr", "list", f"--state={state}", "--limit=1000",
+         "--json=number,title,url,body,headRefName,headRefOid,baseRefName,state,isDraft,mergedAt,mergeCommit,mergeStateStatus"],
         repo, runner,
     )
     try:
         rows = json.loads(out or "[]")
     except json.JSONDecodeError as exc:
         raise ForgeError(f"could not parse open PRs: {exc}") from exc
-    return rows if isinstance(rows, list) else []
+    if not isinstance(rows, list):
+        raise ForgeError("PR inventory response is not a list")
+    if len(rows) >= 1000:
+        raise ForgeError("PR inventory may be truncated at its explicit limit")
+    return rows
+
+
+def list_open_prs(repo, *, runner=subprocess.run) -> list:
+    """Read open PRs including the exact forge head revision."""
+    return list_prs(repo, state="open", runner=runner)
 
 
 def pr_files(repo, pr, *, runner=subprocess.run) -> list[str]:
@@ -165,6 +377,39 @@ def pr_checks(repo, pr, *, runner=subprocess.run) -> list:
     return rows if isinstance(rows, list) else []
 
 
+def checks_for_revision(repo, pr, revision, *, runner=subprocess.run) -> list:
+    """Return checks only when they are tied to the requested PR head revision.
+
+    GitHub's checks endpoint does not expose the head OID in every CLI version, so the PR view is
+    read first and its OID is attached to each check row. A stale/missing OID fails closed.
+    """
+    expected = str(revision or "").strip()
+    if not expected:
+        raise ForgeError("a PR head revision is required to inspect checks")
+    status = pr_status(repo, pr, runner=runner)
+    actual = str(status.get("headRefOid") or status.get("headSha") or "").strip()
+    if actual != expected:
+        return []
+    rows = pr_checks(repo, pr, runner=runner)
+    after = pr_status(repo, pr, runner=runner)
+    final_head = str(after.get("headRefOid") or after.get("headSha") or "").strip()
+    if final_head != expected:
+        raise ForgeError(
+            f"PR head changed while reading checks: expected {expected!r}, found {final_head!r}"
+        )
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row = dict(row)
+        check_revision = str(row.get("headRefOid") or row.get("headSha") or actual).strip()
+        if check_revision != expected:
+            continue
+        row["headRefOid"] = check_revision
+        out.append(row)
+    return out
+
+
 def checks_green(rows) -> bool:
     if not rows:
         return False
@@ -187,11 +432,12 @@ def checks_failed(rows) -> bool:
     )
 
 
-def wait_for_checks(repo, pr, *, max_polls=60, interval=10,
+def wait_for_checks(repo, pr, *, max_polls=60, interval=10, head_revision=None,
                     runner=subprocess.run, sleep_fn=time.sleep) -> list:
     last = []
     for poll in range(max(int(max_polls), 1)):
-        last = pr_checks(repo, pr, runner=runner)
+        last = (checks_for_revision(repo, pr, head_revision, runner=runner)
+                if head_revision is not None else pr_checks(repo, pr, runner=runner))
         if checks_green(last):
             return last
         if checks_failed(last):
@@ -225,7 +471,7 @@ def failed_check_logs(repo, rows, *, runner=subprocess.run) -> str:
 def pr_status(repo, pr, *, runner=subprocess.run) -> dict:
     out = _run(
         ["gh", "pr", "view", _pr_arg(pr),
-         "--json=state,mergedAt,mergeCommit,mergeable,mergeStateStatus,baseRefName,headRefName,isDraft"],
+         "--json=state,mergedAt,mergeCommit,mergeable,mergeStateStatus,baseRefName,headRefName,headRefOid,isDraft,autoMergeRequest"],
         repo, runner,
     )
     try:
@@ -242,7 +488,7 @@ def _merge_commit(status: dict) -> str:
     return str(value or "").strip()
 
 
-def confirm_merge(repo, pr, *, intended_base, runner=subprocess.run) -> MergeConfirmation:
+def confirm_merge(repo, pr, *, intended_base, refresh=True, runner=subprocess.run) -> MergeConfirmation:
     """Confirm a merge from forge state and intended-base ancestry.
 
     A successful ``gh pr merge`` only queues or requests the merge.  Confirmation requires the
@@ -282,6 +528,11 @@ def confirm_merge(repo, pr, *, intended_base, runner=subprocess.run) -> MergeCon
                 cwd=str(repo), capture_output=True, text=True,
             )
             if probe.returncode != 0:
+                if not refresh:
+                    return MergeConfirmation(
+                        False, status,
+                        f"merge evidence {revision!r} is unavailable locally; refresh disabled",
+                    )
                 fetched = runner(
                     ["git", "fetch", "--no-tags", "origin", revision],
                     cwd=str(repo), capture_output=True, text=True,
@@ -479,7 +730,13 @@ def new_feedback_messages(data, seen=None) -> tuple[list[str], set[str]]:
 _MERGE_FLAG = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}
 
 
-def merge_pr(repo, pr, *, method="squash", delete_branch=False, runner=subprocess.run) -> MergeRequest:
+def merge_pr(repo, pr, *, method="squash", delete_branch=False,
+             idempotency_key=None, runner=subprocess.run) -> MergeRequest:
+    boundary_key, boundary_skip = _boundary_before(
+        "merge_pr", {"pr": _pr_arg(pr), "method": method},
+    )
+    if boundary_skip:
+        return MergeRequest()
     """Request a PR merge; return ``queued`` until a later forge confirmation.
 
     This is the auto-merge path, gated on a green tier by the caller. Deliberately NO `--admin`:
@@ -492,4 +749,6 @@ def merge_pr(repo, pr, *, method="squash", delete_branch=False, runner=subproces
     if delete_branch:
         argv.append("--delete-branch")
     _run(argv, repo, runner)
+    _boundary_after("merge_pr", boundary_key or idempotency_key,
+                    {"requested": True, "state": "queued"})
     return MergeRequest()

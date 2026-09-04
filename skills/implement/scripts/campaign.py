@@ -5,6 +5,7 @@ an optional best-of-N width (default 2). Independent Plan items run concurrently
 isolated PR worktrees; dependencies and predicted touched-area conflicts serialize automatically.
 """
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatch
 import json
@@ -20,12 +21,27 @@ from gate import detect_adapter
 from gh import (
     ForgeError,
     checks_failed,
+    checks_green,
+    checks_for_revision,
     commit_and_push,
+    confirm_merge,
     failed_check_logs,
+    feedback_blockers,
     has_merge_conflict,
+    idempotency_marker,
+    idempotency_scope,
     list_open_prs,
+    list_prs,
+    mark_ready,
+    marker_key,
+    merge_pr,
     new_feedback_messages,
+    PrRef,
+    open_draft_pr,
+    pr_comments,
     post_comment,
+    update_body,
+    assign_pr,
     pr_checks,
     pr_feedback,
     pr_files,
@@ -38,13 +54,22 @@ from backends import make_dispatcher
 from profile import load_profile
 from preflight import readiness, preflight_host_callbacks, wrap_host_callback
 from publish import RunArtifacts, finalize, open_draft
+from handoff import render_pr_body, render_review_comment, tier as handoff_tier
 from review import build_final_review_prompt, parse_final_review
 from seed import default_profile
-from workspace import create_branch_worktree, remove_merged_worktree
+from workspace import (
+    branch_inventory,
+    create_branch_worktree,
+    remove_merged_worktree,
+    worktree_inventory,
+    repo_context,
+    WorkspaceError,
+)
 from sandbox import available_backends
 from verification import VerificationContext
 from guard import classify
 from resolvers import Cred
+from scrub import env_secrets, scrub
 from oracle import (
     AcceptanceCriterion,
     AuthoredTest,
@@ -57,6 +82,7 @@ from oracle import (
     validate_criteria,
 )
 import campaign_state
+import continuity
 
 _HERE = Path(__file__).resolve().parent
 _MODELS = json.loads((_HERE / "models.json").read_text())
@@ -64,6 +90,7 @@ _PROVIDERS = json.loads((_HERE / "providers.json").read_text())
 _SAFE = re.compile(r"[^a-z0-9._-]+")
 _REF_SAFE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _ROOT_GIT_LOCK = threading.Lock()
+DEFAULT_CONTEXT_BUDGET = 20000
 
 
 class CampaignError(RuntimeError):
@@ -192,6 +219,15 @@ class ItemResult:
     # Criterion-linked evidence from the final protected gate.  Kept at the end for positional
     # constructor compatibility with existing integrations.
     criterion_evidence: dict = field(default_factory=dict)
+    # Additive lifecycle projection for restart reconciliation.
+    pr_number: int | None = None
+    head_sha: str = ""
+    pr_state: str = ""
+    checks: list = field(default_factory=list)
+    check_head_sha: str = ""
+    merge_state: str = ""
+    merge_commit: str = ""
+    merged_at: str = ""
 
 
 @dataclass
@@ -515,6 +551,80 @@ def _task_brief(item: PlanItem, overlaps) -> str:
     )
 
 
+def _repair_comment_key(state_store, item, pr, action, body, *, details="") -> str:
+    """Derive a stable, action-specific key for a repair status comment.
+
+    Repair comments are externally visible creates and must remain idempotent even when a worker
+    retries after a successful forge write. A durable campaign store supplies the canonical action
+    key; the stateless compatibility path uses the same canonical digest inputs without a random or
+    time-based component.
+    """
+    pr_ref = getattr(pr, "url", None) or str(pr)
+    payload = {
+        "pr": str(pr_ref),
+        "item_id": item.id,
+        "action": str(action),
+        "body": str(body),
+        "details": str(details),
+    }
+    if state_store is not None:
+        return state_store.action_key(item.id, f"{action}_comment", payload)
+    digest = campaign_state._digest(campaign_state._json(payload))[:32]
+    return f"implement-{action}-comment-{digest}"
+
+
+def _bounded_item_context(state_store, item, worktree, *, budget=DEFAULT_CONTEXT_BUDGET):
+    """Assemble a deterministic, history-free Builder context for one fresh item cohort."""
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 1024:
+        raise CampaignError("worker context budget must be an integer >= 1024")
+    projection = state_store.project(item.id)
+    source_budget = max(budget // 2, 512)
+    focus = tuple(dict.fromkeys((*item.touched_areas, *item.oracle_paths)))
+    source = repo_context(
+        worktree, max_chars=source_budget, focus_paths=focus,
+    )
+    context = dict(projection)
+    context["relevant_code_tests"] = source
+    context["builder_cohort"] = {
+        "item_id": item.id,
+        "revision": projection["revision"],
+        "cohort_id": campaign_state._digest({
+            "campaign_id": projection["campaign_id"], "item_id": item.id,
+            "revision": projection["revision"],
+        })[:24],
+    }
+    encoded = json.dumps(context, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if len(encoded) <= budget:
+        return context
+    # Trim only the tracked source/test slice. Immutable specification, item state, and latest
+    # observation remain intact; if those alone exceed the bound, project_worker_context already
+    # supplies a deterministic compact error projection.
+    context["relevant_code_tests"] = source[:max(budget - len(encoded) + len(source), 0)]
+    encoded = json.dumps(context, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if len(encoded) <= budget:
+        return context
+    context["relevant_code_tests"] = ""
+    encoded = json.dumps(context, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if len(encoded) <= budget:
+        return context
+    # Keep the canonical minimum intact. A pathological immutable specification or observation is
+    # a hard failure, never a reason to hand the Builder only a context_error envelope.
+    minimum = {
+        field_name: projection[field_name]
+        for field_name in (
+            "immutable_spec", "campaign_id", "plan_id", "base_sha", "revision", "item_id",
+            "item_state", "criterion_evidence", "latest_observation",
+        )
+    }
+    minimum_size = len(json.dumps(minimum, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    if minimum_size > budget:
+        raise CampaignError("immutable worker context exceeds budget")
+    minimum["builder_cohort"] = context["builder_cohort"]
+    if len(json.dumps(minimum, sort_keys=True, separators=(",", ":"), ensure_ascii=False)) > budget:
+        minimum.pop("builder_cohort")
+    return minimum
+
+
 def _criterion_prompts(item: PlanItem) -> tuple[str, ...]:
     """Keep stable criterion IDs visible to every Reviewer prompt."""
     criteria = item.criteria or normalize_criteria(item.acceptance)
@@ -764,7 +874,8 @@ def _review_diff(worktree, base_sha, runner) -> str:
 
 def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispatchers,
                        runner, env, trusted, base_sha, verification_context,
-                       oracle_snapshot=None, protected_oracle_paths=()):
+                       oracle_snapshot=None, protected_oracle_paths=(), state_store=None,
+                       context_budget=DEFAULT_CONTEXT_BUDGET):
     _require_verification_context(worktree, verification_context)
     for round_no in range(1, 4):
         diff = _review_diff(worktree, base_sha, runner)
@@ -799,6 +910,9 @@ def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispat
             required_paths_must_change=False,
             verification_context=verification_context,
             protected_oracle_paths=protected_oracle_paths,
+            worker_context=(_bounded_item_context(
+                state_store, item, worktree, budget=context_budget,
+            ) if state_store is not None else None),
         )
         if not fix.winner or not fix.applied:
             raise CampaignError(f"review-fix round {round_no} produced no green candidate")
@@ -808,7 +922,8 @@ def _final_review_loop(worktree, item, roles, profile, review_fn, builder_dispat
 
 def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
                trusted, pr, branch, verification_context, oracle_snapshot=None,
-               protected_oracle_paths=()):
+               protected_oracle_paths=(), state_store=None,
+               context_budget=DEFAULT_CONTEXT_BUDGET):
     _require_verification_context(worktree, verification_context)
     rows = pr_checks(worktree, pr, runner=runner)
     logs = failed_check_logs(worktree, rows, runner=runner)
@@ -835,16 +950,23 @@ def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
         required_paths_must_change=False,
         verification_context=verification_context,
         protected_oracle_paths=protected_oracle_paths,
+        worker_context=(_bounded_item_context(
+            state_store, item, worktree, budget=context_budget,
+        ) if state_store is not None else None),
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the CI failure locally")
     _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
+    comment_body = (
+        f"## CI repair\n\nConfigured Best-of-{roles.best_of_n} Builders produced a local-green "
+        f"repair for **{item.title}**. The updated revision will be re-reviewed and CI rerun."
+    )
     post_comment(
         worktree,
         pr,
-        (
-            f"## CI repair\n\nConfigured Best-of-{roles.best_of_n} Builders produced a local-green "
-            f"repair for **{item.title}**. The updated revision will be re-reviewed and CI rerun."
+        comment_body,
+        idempotency_key=_repair_comment_key(
+            state_store, item, pr, "ci-repair", comment_body, details=logs or rows,
         ),
         runner=runner,
     )
@@ -853,7 +975,8 @@ def _repair_ci(worktree, item, roles, profile, builder_dispatchers, runner, env,
 
 def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
                            runner, env, trusted, pr, branch, verification_context,
-                           oracle_snapshot=None, protected_oracle_paths=()):
+                           oracle_snapshot=None, protected_oracle_paths=(), state_store=None,
+                           context_budget=DEFAULT_CONTEXT_BUDGET):
     _require_verification_context(worktree, verification_context)
     status = pr_status(worktree, pr, runner=runner)
     if not has_merge_conflict(status):
@@ -871,10 +994,16 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
     )
     if proc.returncode == 0:
         _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
+        comment_body = (
+            f"## Base refresh\n\nMerged the latest `{base}` into this PR and re-ran local verification."
+        )
         post_comment(
             worktree,
             pr,
-            f"## Base refresh\n\nMerged the latest `{base}` into this PR and re-ran local verification.",
+            comment_body,
+            idempotency_key=_repair_comment_key(
+                state_store, item, pr, "base-refresh", comment_body, details=base,
+            ),
             runner=runner,
         )
         return True, target
@@ -906,16 +1035,23 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
         required_paths_must_change=False,
         verification_context=verification_context,
         protected_oracle_paths=protected_oracle_paths,
+        worker_context=(_bounded_item_context(
+            state_store, item, worktree, budget=context_budget,
+        ) if state_store is not None else None),
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the merge conflicts")
     _verify_with_snapshot(worktree, verification_context, oracle_snapshot)
+    comment_body = (
+        f"## Merge-conflict repair\n\nConfigured Best-of-{roles.best_of_n} Builders resolved "
+        f"the conflicts against `{base}`. The result will be re-reviewed and CI rerun."
+    )
     post_comment(
         worktree,
         pr,
-        (
-            f"## Merge-conflict repair\n\nConfigured Best-of-{roles.best_of_n} Builders resolved "
-            f"the conflicts against `{base}`. The result will be re-reviewed and CI rerun."
+        comment_body,
+        idempotency_key=_repair_comment_key(
+            state_store, item, pr, "merge-conflict-repair", comment_body, details=conflicts,
         ),
         runner=runner,
     )
@@ -925,7 +1061,8 @@ def _repair_merge_conflict(worktree, item, roles, profile, builder_dispatchers,
 def _repair_review_feedback(worktree, item, roles, profile, review_fn,
                             builder_dispatchers, runner, env, trusted, pr,
                             branch, base_sha, seen, verification_context,
-                            oracle_snapshot=None, protected_oracle_paths=()):
+                            oracle_snapshot=None, protected_oracle_paths=(), state_store=None,
+                            context_budget=DEFAULT_CONTEXT_BUDGET):
     _require_verification_context(worktree, verification_context)
     messages, seen = new_feedback_messages(
         pr_feedback(worktree, pr, runner=runner),
@@ -965,6 +1102,9 @@ def _repair_review_feedback(worktree, item, roles, profile, review_fn,
         required_paths_must_change=False,
         verification_context=verification_context,
         protected_oracle_paths=protected_oracle_paths,
+        worker_context=(_bounded_item_context(
+            state_store, item, worktree, budget=context_budget,
+        ) if state_store is not None else None),
     )
     if not fix.winner or not fix.applied:
         raise CampaignError("no Builder candidate resolved the validated review feedback")
@@ -972,7 +1112,7 @@ def _repair_review_feedback(worktree, item, roles, profile, review_fn,
     final = _final_review_loop(
         worktree, item, roles, profile, review_fn, builder_dispatchers,
         runner, env, trusted, base_sha, verification_context,
-        oracle_snapshot, protected_oracle_paths,
+        oracle_snapshot, protected_oracle_paths, state_store, context_budget,
     )
     commit_and_push(
         worktree,
@@ -982,12 +1122,16 @@ def _repair_review_feedback(worktree, item, roles, profile, review_fn,
         checkout=False,
         runner=runner,
     )
+    comment_body = (
+        f"## Review-feedback repair\n\nValidated GitHub feedback was addressed by the configured "
+        f"Best-of-{roles.best_of_n} Builders, locally verified, and re-reviewed."
+    )
     post_comment(
         worktree,
         pr,
-        (
-            f"## Review-feedback repair\n\nValidated GitHub feedback was addressed by the configured "
-            f"Best-of-{roles.best_of_n} Builders, locally verified, and re-reviewed."
+        comment_body,
+        idempotency_key=_repair_comment_key(
+            state_store, item, pr, "review-feedback-repair", comment_body, details=findings,
         ),
         runner=runner,
     )
@@ -1021,6 +1165,16 @@ def _initial_campaign_state(repo, plan, runner, *, home=None, campaign_id=None, 
     # (including linked worktrees, whose ``.git`` is a file) still initialize canonical state.
     if not root.is_dir() or (not (root / ".git").exists() and not refresh_base):
         return None
+    # A restart must read and validate the existing canonical identity before touching remote refs.
+    # The state base remains the immutable campaign base; a newer origin/main is merely a forge
+    # observation until the Manager explicitly schedules a rebase/amendment.
+    if campaign_state.state_exists(repo, home=home):
+        existing = campaign_state.load_state(repo, home=home)
+        return campaign_state.ensure_campaign_state(
+            repo, plan, existing["base_sha"], home=home,
+            campaign_id=campaign_id or existing["campaign_id"],
+            plan_id=plan_id or existing["plan_id"],
+        )
     if refresh_base:
         base_ref = _sync_base(repo, plan.base, runner)
         base_sha = _run(["git", "rev-parse", base_ref], repo, runner).strip()
@@ -1039,6 +1193,824 @@ def _initial_campaign_state(repo, plan, runner, *, home=None, campaign_id=None, 
     return campaign_state.ensure_campaign_state(
         repo, plan, base_sha, home=home, campaign_id=campaign_id, plan_id=plan_id,
     )
+
+
+def _row_pr_ref(row) -> PrRef | None:
+    if not isinstance(row, dict):
+        return None
+    raw_number = row.get("number")
+    if isinstance(raw_number, bool) or not isinstance(raw_number, (int, str)):
+        return None
+    try:
+        number = int(raw_number)
+    except ValueError:
+        return None
+    return PrRef(
+        number=number,
+        url=str(row.get("url") or ""),
+        branch=str(row.get("headRefName") or ""),
+        head_sha=str(row.get("headRefOid") or row.get("headSha") or ""),
+        base=str(row.get("baseRefName") or ""),
+        title=str(row.get("title") or ""),
+        state=str(row.get("state") or ""),
+        is_draft=bool(row.get("isDraft", False)),
+    )
+
+
+def _merge_commit_value(status) -> str:
+    value = status.get("mergeCommit") if isinstance(status, dict) else None
+    if isinstance(value, dict):
+        return str(value.get("oid") or value.get("sha") or value.get("commit") or "")
+    return str(value or "")
+
+
+def _action_record_for_item(state, item_id, action, payload=None):
+    """Find the durable key for an action, accepting legacy state records without a key."""
+    if not isinstance(state, dict):
+        return None
+    expected_digest = campaign_state._digest(campaign_state._json(payload)) if payload is not None else ""
+    for key, record in state.get("external_actions", {}).items():
+        if not isinstance(record, dict) or record.get("item_id") != item_id:
+            continue
+        if record.get("action") != action:
+            continue
+        if record.get("payload_digest", "") == expected_digest:
+            return str(key)
+    return campaign_state.stable_action_key(state["campaign_id"], item_id, action, payload)
+
+
+def reconcile_campaign(repo, plan=None, *, state_store=None, home=None, runner=subprocess.run,
+                       include_closed=True, persist=True, inventory=None) -> dict:
+    """Read all restart evidence before a campaign performs an external mutation.
+
+    The returned snapshot is a detached observation. It includes canonical state identity,
+    local/remote branch and worktree inventories, matching PR identity and head revision, checks
+    explicitly tied to that revision, queued-merge status, and forge-confirmed merge evidence. A
+    successful forge command is never interpreted as a merge. If ``state_store`` is supplied, the
+    complete snapshot is persisted as manager-owned reconciliation evidence after the read phase.
+    """
+    if state_store is None:
+        if not campaign_state.state_exists(repo, home=home):
+            raise CampaignError("cannot resume without canonical campaign state")
+        state_store = campaign_state.CampaignStateStore(repo, home=home)
+    state = state_store.read()
+    if plan is not None:
+        candidate = CampaignPlan.from_value(plan)
+        candidate_state = campaign_state.new_state(
+            candidate, state["base_sha"], campaign_id=state["campaign_id"],
+            plan_id=state["plan_id"],
+        )
+        candidate_digest = candidate_state["plan_identity"]["digest"]
+        # ensure_campaign_state above performs the full identity check; this guard catches callers
+        # that pass a different active plan to a manually constructed store.
+        if candidate_digest != state["plan_identity"]["digest"]:
+            raise CampaignError("resume Plan identity does not match canonical state")
+    try:
+        if isinstance(inventory, dict):
+            branches = inventory.get("branches", {"local": {}, "remote": {}})
+            worktrees = inventory.get("worktrees", [])
+            prs = inventory.get("prs", inventory.get("open_prs", []))
+        else:
+            branches = branch_inventory(repo, runner=runner)
+            worktrees = worktree_inventory(repo, runner=runner)
+            prs = list_prs(repo, state="all" if include_closed else "open", runner=runner)
+        if not isinstance(branches, dict) or not isinstance(worktrees, list) or not isinstance(prs, list):
+            raise CampaignError("restart inventory has malformed branches, worktrees, or PRs")
+    except (WorkspaceError, ForgeError) as exc:
+        raise CampaignError(f"restart reconciliation could not read forge/workspace state: {exc}") from exc
+
+    worktree_by_branch = {
+        str(row.get("branch")): row for row in worktrees
+        if isinstance(row, dict) and row.get("branch")
+    }
+    injected_inventory = isinstance(inventory, dict)
+    injected_status: dict | None = (
+        inventory.get("statuses", {}) if injected_inventory else None
+    )
+    injected_checks: dict | None = (
+        inventory.get("checks", {}) if injected_inventory else None
+    )
+    injected_comments: dict | None = (
+        inventory.get("comments", {}) if injected_inventory else None
+    )
+    items = {}
+    action_observations = {}
+    for item_spec in state["plan"]["items"]:
+        item_id = str(item_spec["id"])
+        branch = _branch(PlanItem.from_mapping(item_spec))
+        base = str(state["plan"].get("base") or "main")
+        title = str(item_spec.get("title") or item_id)
+        payload = {"branch": branch, "base": base, "title": title}
+        open_key = _action_record_for_item(state, item_id, "open_draft_pr", payload)
+        matching = []
+        for row in prs:
+            if not isinstance(row, dict):
+                continue
+            marker = marker_key(row.get("body"))
+            marker_match = marker == open_key
+            state_item = state["item_states"][item_id]
+            state_match = (
+                state_item.get("pr_number") is not None
+                and str(row.get("number")) == str(state_item.get("pr_number"))
+            ) or (
+                state_item.get("pr_url")
+                and str(row.get("url") or "") == str(state_item.get("pr_url"))
+            )
+            if marker_match:
+                if (str(row.get("headRefName") or "") != branch
+                        or str(row.get("baseRefName") or "") != base
+                        or str(row.get("title") or "").strip() != title.strip()):
+                    raise CampaignError(
+                        f"idempotency key {open_key!r} is bound to a different PR object"
+                    )
+                matching.append(row)
+            elif state_match:
+                matching.append(row)
+        # A marker-bearing object is authoritative; two objects with one key are corruption.
+        unique_numbers = {str(row.get("number")) for row in matching}
+        if len(unique_numbers) > 1:
+            raise CampaignError(f"multiple PRs match item {item_id!r}; refusing ambiguous resume")
+        row = matching[0] if matching else None
+        pr_ref = _row_pr_ref(row)
+        status = {}
+        checks: list[dict] = []
+        check_head = ""
+        confirmed = None
+        if pr_ref is not None:
+            if row is None:
+                raise CampaignError("matching PR identity is missing its inventory row")
+            if injected_inventory:
+                if not isinstance(injected_status, dict):
+                    raise CampaignError("injected PR status inventory is malformed")
+                if str(pr_ref.number) in injected_status:
+                    status = injected_status[str(pr_ref.number)]
+                else:
+                    # An injected inventory is a complete observation boundary: absent status,
+                    # checks, or comments never trigger an implicit live forge read.  PR-list
+                    # identity fields are still usable as the status observation for phase
+                    # classification.
+                    status = {
+                        field_name: row.get(field_name)
+                        for field_name in (
+                            "state", "headRefOid", "baseRefName", "headRefName", "isDraft",
+                        )
+                        if field_name in row
+                    }
+            else:
+                try:
+                    status = pr_status(repo, pr_ref, runner=runner)
+                except ForgeError as exc:
+                    raise CampaignError(f"cannot read matching PR #{pr_ref.number} status: {exc}") from exc
+            if not isinstance(status, dict):
+                raise CampaignError(f"matching PR #{pr_ref.number} status is malformed")
+            head_sha = str(status.get("headRefOid") or pr_ref.head_sha or "").strip()
+            if head_sha:
+                check_head = head_sha
+                if injected_inventory:
+                    if not isinstance(injected_checks, dict):
+                        raise CampaignError("injected PR checks inventory is malformed")
+                    raw_checks = injected_checks.get(str(pr_ref.number), [])
+                    if not isinstance(raw_checks, list):
+                        raise CampaignError(
+                            f"checks for PR #{pr_ref.number} are malformed"
+                        )
+                    # Test/host inventories are observations too: never attach a stale check
+                    # result to a newer PR head.  Forge reads annotate rows in
+                    # checks_for_revision(); injected rows must carry the same evidence.
+                    checks = []
+                    for check in raw_checks:
+                        if not isinstance(check, dict):
+                            continue
+                        check_revision = str(
+                            check.get("headRefOid") or check.get("headSha") or ""
+                        ).strip()
+                        if check_revision != head_sha:
+                            continue
+                        check = dict(check)
+                        check["headRefOid"] = check_revision
+                        checks.append(check)
+                else:
+                    try:
+                        checks = checks_for_revision(repo, pr_ref, head_sha, runner=runner)
+                    except ForgeError as exc:
+                        raise CampaignError(f"cannot read checks for PR #{pr_ref.number}: {exc}") from exc
+            merge_state = str(status.get("state") or "").upper()
+            if merge_state == "MERGED":
+                confirmed = confirm_merge(
+                    repo, pr_ref, intended_base=state["base_sha"], refresh=False, runner=runner,
+                )
+            merge_state_status = str(status.get("mergeStateStatus") or "").upper()
+            # BEHIND is a refresh requirement, not evidence that an auto-merge request crossed the
+            # merge boundary. Give it precedence even if the forge still reports an auto-merge
+            # request while the head is stale.
+            queued = (
+                merge_state_status != "BEHIND"
+                and bool(
+                    status.get("isInMergeQueue")
+                    or status.get("autoMergeRequest")
+                    or merge_state_status == "QUEUED"
+                )
+            )
+            merge_state = (
+                "MERGED" if confirmed is not None and confirmed.confirmed else
+                "QUEUED" if queued
+                else merge_state
+            )
+        state_item = state["item_states"][item_id]
+        local_sha = branches.get("local", {}).get(branch, "")
+        remote_sha = branches.get("remote", {}).get(branch, "")
+        wt = worktree_by_branch.get(branch, {})
+        is_merged = bool(confirmed is not None and confirmed.confirmed)
+        phase = (
+            "merged" if is_merged else
+            "queued" if pr_ref is not None and str(status.get("state") or "").upper() != "MERGED"
+            and str(status.get("mergeStateStatus") or "").upper() != "BEHIND"
+            and (status.get("isInMergeQueue") or status.get("autoMergeRequest")
+                 or str(status.get("mergeStateStatus") or "").upper() == "QUEUED") else
+            "ready" if pr_ref is not None and not bool(status.get("isDraft")) else
+            "draft" if pr_ref is not None else
+            "worktree" if wt else
+            "remote_branch" if remote_sha else
+            "local_branch" if local_sha else "pending"
+        )
+        row_number = row.get("number") if row is not None else None
+        if isinstance(row_number, bool) or not isinstance(row_number, (int, str)):
+            pr_number = state_item.get("pr_number")
+        else:
+            pr_number = int(row_number)
+        fact = {
+            "phase": phase,
+            "branch": branch,
+            "worktree": str(wt.get("path") or ""),
+            "pr_url": str((row or {}).get("url") or state_item.get("pr_url") or ""),
+            "pr_number": pr_number,
+            "base_sha": state["base_sha"],
+            "local_sha": str(local_sha or ""),
+            "remote_sha": str(remote_sha or ""),
+            "head_sha": str(status.get("headRefOid") or (row or {}).get("headRefOid") or remote_sha or local_sha),
+            "pr_state": str(status.get("state") or (row or {}).get("state") or ""),
+            "checks": checks,
+            "check_head_sha": check_head,
+            "merge_state": (
+                "MERGED" if is_merged else
+                "QUEUED" if phase == "queued" else str(status.get("mergeStateStatus") or "")
+            ),
+            "merge_commit": _merge_commit_value(confirmed.status if confirmed else status),
+            "merged_at": str((confirmed.status if confirmed else status).get("mergedAt") or ""),
+            "merged": is_merged,
+            "forge": {"pr": row or {}, "status": status, "remote_sha": remote_sha},
+        }
+        items[item_id] = fact
+        if row is not None and pr_ref is not None and state.get("external_actions"):
+            if injected_inventory:
+                if not isinstance(injected_comments, dict):
+                    raise CampaignError("injected PR comments inventory is malformed")
+                comments = injected_comments.get(str(pr_ref.number), [])
+                if not isinstance(comments, list):
+                    raise CampaignError(f"comments for PR #{pr_ref.number} are malformed")
+            else:
+                try:
+                    comments = pr_comments(repo, pr_ref, runner=runner)
+                except ForgeError as exc:
+                    raise CampaignError(f"cannot read comments for matching PR #{pr_ref.number}: {exc}") from exc
+            for key, action in state["external_actions"].items():
+                if not isinstance(action, dict) or action.get("item_id") != item_id:
+                    continue
+                found = marker_key(row.get("body")) == key or any(
+                    isinstance(comment, dict)
+                    and (marker_key(comment.get("body")) == key
+                         or marker_key(comment.get("body")).startswith(key + "-comment-"))
+                    for comment in comments
+                )
+                if found:
+                    action_observations[key] = {
+                        "observed": True,
+                        "result": {"pr_number": pr_ref.number, "pr_url": pr_ref.url},
+                    }
+    journal = continuity.load_events(repo, home)
+    facts = {
+        "canonical": {"campaign_id": state["campaign_id"], "plan_id": state["plan_id"],
+                      "revision": state["revision"], "base_sha": state["base_sha"]},
+        "journal": {
+            "event_count": len(journal),
+            "latest": journal[-1] if journal else None,
+        },
+        "branches": branches,
+        "worktrees": worktrees,
+        "prs": prs,
+        "items": items,
+        "actions": action_observations,
+    }
+    if persist:
+        state_store.reconcile(facts, expected_revision=state["revision"])
+    return facts
+
+
+# Names retained for host integrations that use either resume or reconcile terminology.
+resume_campaign = reconcile_campaign
+reconcile_resume = reconcile_campaign
+
+
+def _resumed_item_result(item, fact) -> ItemResult:
+    """Materialize a reconciled lifecycle without invoking a Builder again.
+
+    Ready/queued PRs remain non-terminal: the next campaign invocation will reconcile the forge
+    again and may observe a confirmed merge. This projection deliberately carries the exact head
+    and check revision so callers cannot mistake a prior ready/queue observation for completion.
+    """
+    phase = str(fact.get("phase") or "pending")
+    forge = fact.get("forge", {}) if isinstance(fact.get("forge"), dict) else {}
+    return ItemResult(
+        item_id=item.id,
+        status="merged" if phase == "merged" else phase,
+        branch=str(fact.get("branch") or _branch(item)),
+        worktree=str(fact.get("worktree") or ""),
+        pr_url=str(fact.get("pr_url") or ""),
+        merged=phase == "merged",
+        changed_files=tuple(forge.get("changed_files", ()) if isinstance(forge, dict) else ()),
+        pr_number=fact.get("pr_number"),
+        head_sha=str(fact.get("head_sha") or ""),
+        pr_state=str(fact.get("pr_state") or ""),
+        checks=list(fact.get("checks") or []),
+        check_head_sha=str(fact.get("check_head_sha") or ""),
+        merge_state=str(fact.get("merge_state") or ""),
+        merge_commit=str(fact.get("merge_commit") or ""),
+        merged_at=str(fact.get("merged_at") or ""),
+    )
+
+
+def _finding_labels(findings) -> list[str]:
+    """Keep checkpoint eligibility evidence JSON-safe while retaining actionable labels."""
+    return [str(getattr(finding, "title", finding)) for finding in (findings or ())]
+
+
+def _publication_checkpoint(
+        artifacts: RunArtifacts, *, item, worktree, base_sha, pr_base, observed_head_sha,
+        autonomy, merge_method, assignee, open_action_key, changed_files,
+        protected_oracle_paths=(), pr_number=None, pr_url="", pushed_head_sha="",
+) -> dict:
+    """Build and validate the complete pre-PR finalization replay contract."""
+    evidence = dict(artifacts.acceptance_evidence or {})
+    ids = list(artifacts.acceptance_ids)
+    evidence_complete = (
+        artifacts.acceptance_n > 0
+        and len(evidence) == artifacts.acceptance_n
+        and set(evidence) == set(ids)
+        and all(evidence.get(criterion_id) is True for criterion_id in ids)
+    )
+    routed = _finding_labels(getattr(artifacts.review, "routed", ()))
+    escalated = _finding_labels(getattr(artifacts.review, "escalated", ()))
+    review_clean = not routed and not escalated
+    green = bool(artifacts.regate_passed and evidence_complete and review_clean)
+    label = handoff_tier(
+        acceptance_green=evidence_complete,
+        regate_passed=artifacts.regate_passed,
+        review=artifacts.review,
+        acceptance_evidence=evidence,
+        acceptance_ids=tuple(ids),
+    )
+    eligibility = {
+        "tier": label,
+        "criterion_evidence": evidence,
+        "criterion_evidence_complete": evidence_complete,
+        "regate": bool(artifacts.regate_passed),
+        "review_blockers": routed,
+        "escalations": escalated,
+        "auto_merge_policy": autonomy == "auto-merge",
+        "eligible": bool(autonomy == "auto-merge" and label == "green" and green),
+    }
+    secrets = env_secrets()
+    review_rendering = scrub(render_review_comment(artifacts.review), secrets)
+    body = scrub(
+        render_pr_body(
+            goal=artifacts.goal,
+            consensus_notes=artifacts.consensus_notes,
+            acceptance_k=artifacts.acceptance_k,
+            acceptance_n=artifacts.acceptance_n,
+            review=artifacts.review,
+            tier_label=label,
+            trace=artifacts.trace,
+            acceptance_evidence=evidence,
+            acceptance_ids=tuple(ids),
+        ),
+        secrets,
+    )
+    checkpoint = {
+        "schema_version": campaign_state.PUBLICATION_CHECKPOINT_VERSION,
+        "branch": artifacts.branch,
+        "worktree": str(worktree),
+        "title": artifacts.title,
+        "goal": artifacts.goal,
+        "consensus_notes": artifacts.consensus_notes,
+        "base_sha": str(base_sha),
+        "intended_base": str(artifacts.intended_base),
+        "pr_base": str(pr_base),
+        "head_sha": str(observed_head_sha),
+        "pushed_head_sha": str(pushed_head_sha),
+        "pr_number": pr_number,
+        "pr_url": str(pr_url),
+        "acceptance_k": int(artifacts.acceptance_k),
+        "acceptance_n": int(artifacts.acceptance_n),
+        "acceptance_ids": ids,
+        "acceptance_evidence": evidence,
+        "regate": bool(artifacts.regate_passed),
+        "tier": label,
+        "eligibility": eligibility,
+        "review": {
+            "rendering": review_rendering,
+            "decision": str(getattr(artifacts.review, "decision", "")),
+        },
+        "trace": campaign_state._json(artifacts.trace or {}),
+        "stacked_on": str(artifacts.stacked_on),
+        "autonomy": str(autonomy),
+        "merge_method": str(merge_method),
+        "assignee": str(assignee or ""),
+        "protected_oracle_paths": [str(path) for path in protected_oracle_paths],
+        "changed_files": [str(path) for path in changed_files],
+        "open_action_key": str(open_action_key),
+        "pr_body": body,
+    }
+    return campaign_state.validate_publication_checkpoint(checkpoint)
+
+
+def _resume_blocked(result: ItemResult, reason: str) -> ItemResult:
+    result.status = "blocked"
+    result.merged = False
+    result.error = str(reason)
+    return result
+
+
+def _resume_feedback_blocker(repo, pr, runner) -> str:
+    """Refresh forge review state at the restart boundary; return a blocking reason if any."""
+    try:
+        feedback = pr_feedback(repo, pr, runner=runner)
+    except ForgeError as exc:
+        return f"recovered forge review state is unavailable: {exc}"
+    blockers = feedback_blockers(feedback)
+    return "; ".join(blockers)
+
+
+def _resume_finalization_boundary(repo, item, fact, state_store, runner) -> ItemResult:
+    """Replay a validated publication checkpoint without creating a new Builder cohort."""
+    result = _resumed_item_result(item, fact)
+    if result.status not in {"draft", "ready", "queued"}:
+        return result
+    state = state_store.read()
+    lifecycle = state["item_states"][item.id].get("lifecycle", {})
+    if not isinstance(lifecycle, Mapping):
+        return _resume_blocked(result, "recovery lifecycle is missing")
+    raw_checkpoint = lifecycle.get("publication_checkpoint")
+    if not isinstance(raw_checkpoint, Mapping):
+        return _resume_blocked(result, "publication checkpoint is missing or malformed")
+    try:
+        checkpoint = campaign_state.validate_publication_checkpoint(raw_checkpoint)
+    except campaign_state.StateSchemaError as exc:
+        return _resume_blocked(result, f"publication checkpoint is missing or malformed: {exc}")
+    forge = fact.get("forge", {}) if isinstance(fact.get("forge"), dict) else {}
+    pr = _row_pr_ref(forge.get("pr"))
+    if pr is None:
+        return _resume_blocked(result, "recovery PR identity is missing")
+
+    mismatches = []
+    if checkpoint["pr_number"] != pr.number:
+        mismatches.append("PR number")
+    if checkpoint["pr_url"] and checkpoint["pr_url"] != pr.url:
+        mismatches.append("PR URL")
+    if checkpoint["branch"] != pr.branch:
+        mismatches.append("head branch")
+    if checkpoint["pr_base"] != pr.base:
+        mismatches.append("PR base")
+    if checkpoint["title"].strip() != pr.title.strip():
+        mismatches.append("PR title")
+    if checkpoint["worktree"] and checkpoint["worktree"] != result.worktree:
+        mismatches.append("worktree")
+    head_sha = str(fact.get("head_sha") or "").strip()
+    expected_head = str(checkpoint["pushed_head_sha"] or checkpoint["head_sha"]).strip()
+    if not head_sha or not expected_head or head_sha != expected_head:
+        mismatches.append("head revision")
+    if checkpoint["pushed_head_sha"] and checkpoint["head_sha"] != checkpoint["pushed_head_sha"]:
+        mismatches.append("checkpoint head revision")
+    check_head_sha = str(fact.get("check_head_sha") or "").strip()
+    if check_head_sha and check_head_sha != head_sha:
+        mismatches.append("check head revision")
+    checks = fact.get("checks")
+    early_draft = result.status == "draft" and isinstance(checks, list) and not checks
+    if not isinstance(checks, list):
+        mismatches.append("matching-head checks")
+    elif not checks:
+        # The checkpoint is persisted immediately after PR creation, before the first CI poll. A
+        # crash in that window leaves a valid draft with no check observation yet. It is safe to
+        # recover that draft, but this exception applies only to draft/queue observations; any
+        # ready PR must retain an explicit matching-head check set before further finalization.
+        if result.status not in {"draft", "queued"}:
+            mismatches.append("matching-head checks")
+    elif any(
+            not isinstance(row, Mapping)
+            or str(row.get("headRefOid") or row.get("headSha") or "").strip() != head_sha
+            for row in checks):
+        mismatches.append("matching-head checks")
+    elif not checks_green(checks):
+        mismatches.append("green checks")
+    if mismatches:
+        return _resume_blocked(result, "recovery evidence mismatch: " + ", ".join(mismatches))
+
+    eligibility = checkpoint["eligibility"]
+    if lifecycle.get("automerge") is not None and lifecycle.get("automerge") != eligibility["eligible"]:
+        return _resume_blocked(result, "lifecycle auto-merge flag disagrees with checkpoint eligibility")
+    method = checkpoint["merge_method"]
+    assignee = checkpoint["assignee"]
+
+    # A queued PR has already crossed the merge-request boundary. Its queue observation is
+    # terminal for this invocation: do not replay body/comment/ready/assignment writes, and never
+    # submit a second merge request. Reconciliation has already persisted the forge observation and
+    # this result remains queued until a later invocation confirms the merge.
+    if result.status == "queued":
+        return result
+    if result.merge_state.upper() == "BEHIND":
+        return _resume_blocked(
+            result,
+            "recovered PR is behind its base; refresh and re-gate it before finalization",
+        )
+    if result.pr_state.upper() == "MERGED" or result.merge_state.upper() == "MERGED":
+        return _resume_blocked(
+            result,
+            "recovered PR reports merged without confirmed ancestry; reconcile it before finalization",
+        )
+
+    feedback_reason = _resume_feedback_blocker(repo, pr, runner)
+    if feedback_reason:
+        return _resume_blocked(result, f"recovered forge review blocks finalization: {feedback_reason}")
+
+    # The merge request is a duplication-sensitive external write. Keep its action identity
+    # separate from the publication action and bind it to the exact PR, both the forge base and
+    # the locally verified base revision, head revision, and merge method. This lets a restart
+    # distinguish an unattempted request from an intent left behind by a crash after ``gh pr
+    # merge`` but before the action journal was completed.
+    merge_payload = {
+        "pr_number": pr.number,
+        "pr_url": pr.url,
+        "base": checkpoint["pr_base"],
+        "base_sha": checkpoint["base_sha"],
+        "head_sha": head_sha,
+        "method": method,
+    }
+    merge_action_key = state_store.action_key(item.id, "merge_pr", merge_payload)
+
+    def boundary(phase, action, payload):
+        if phase == "before":
+            if action == "merge_pr":
+                # ``merge_pr`` supplies only the forge-facing method/PR argument. The durable key
+                # is deliberately built from the validated checkpoint above, rather than from a
+                # mutable caller string, so a different PR/head/base/method cannot reuse it.
+                existing = state_store.action(merge_action_key)
+                _, record, skip = state_store.begin_action(
+                    item.id, action, payload=merge_payload, key=merge_action_key,
+                )
+                if skip:
+                    return record["key"], True
+                if existing is not None and existing.get("status") == "intent":
+                    # An incomplete intent is ambiguous: never issue a second merge request until
+                    # the forge tells us that the request is already queued or the PR is merged.
+                    try:
+                        observed = pr_status(repo, pr, runner=runner)
+                    except ForgeError as exc:
+                        raise ForgeError(
+                            f"could not reconcile prior merge request {record['key']!r}: {exc}"
+                        ) from exc
+                    observed_state = str(observed.get("state") or "").upper()
+                    observed_merge_state = str(
+                        observed.get("mergeStateStatus") or ""
+                    ).upper()
+                    queued = bool(
+                        observed.get("isInMergeQueue")
+                        or observed.get("autoMergeRequest")
+                        or observed_merge_state == "QUEUED"
+                    )
+                    if observed_state == "MERGED" or queued:
+                        observed_phase = "merged" if observed_state == "MERGED" else "queued"
+                        state_store.complete_action(
+                            record["key"],
+                            result={"state": observed_phase, "observed": True},
+                        )
+                        return record["key"], True
+                    raise ForgeError(
+                        f"prior merge request {record['key']!r} has no queued or merged forge state"
+                    )
+                return record["key"], False
+            boundary_payload = {
+                "pr_number": pr.number,
+                "head_sha": head_sha,
+                "base_sha": checkpoint["base_sha"],
+                "payload": payload,
+            }
+            _, record, skip = state_store.begin_action(
+                item.id, action, payload=boundary_payload,
+            )
+            return record["key"], skip
+        key = payload.get("key") if isinstance(payload, Mapping) else None
+        if key:
+            state_store.complete_action(key, result=payload.get("result"))
+        return None
+
+    try:
+        # These calls are intentionally explicit instead of invoking publish.finalize: the
+        # checkpoint contains already-rendered, scrubbed artifacts and therefore can replay each
+        # externally visible boundary without reconstructing a ReviewRound or calling a Builder.
+        review_payload = {
+            "pr": pr.url,
+            "body": checkpoint["review"]["rendering"],
+        }
+        review_boundary_payload = {
+            "pr_number": pr.number,
+            "head_sha": head_sha,
+            "base_sha": checkpoint["base_sha"],
+            "payload": review_payload,
+        }
+        review_action_key = state_store.action_key(
+            item.id, "post_comment", review_boundary_payload,
+        )
+        with idempotency_scope(None, boundary=boundary):
+            update_body(repo, pr, checkpoint["pr_body"], runner=runner)
+            post_comment(
+                repo,
+                pr,
+                checkpoint["review"]["rendering"],
+                idempotency_key=review_action_key,
+                runner=runner,
+            )
+            mark_ready(repo, pr, runner=runner)
+            if assignee:
+                assign_pr(repo, pr, assignee=assignee, runner=runner)
+    except (ForgeError, campaign_state.CampaignStateError) as exc:
+        return _resume_blocked(result, f"recovered finalization boundary failed: {exc}")
+
+    # An early draft has not yet produced a CI observation. Publication can safely be replayed,
+    # but the pre-merge green-check requirement still applies, so leave it ready for a later
+    # reconciliation/wait rather than requesting a merge from an empty check set.
+    if early_draft:
+        result.status = "ready"
+        return result
+    if eligibility["eligible"] is not True:
+        return result
+    if checkpoint["stacked_on"]:
+        return _resume_blocked(
+            result,
+            f"stacked child waits for unmerged dependency {checkpoint['stacked_on']!r}",
+        )
+    feedback_reason = _resume_feedback_blocker(repo, pr, runner)
+    if feedback_reason:
+        return _resume_blocked(result, f"forge review changed before merge: {feedback_reason}")
+    try:
+        # Keep the merge request inside the same canonical boundary observer as the other
+        # publication writes. A completed action or a queued/merged observation from a prior
+        # intent therefore returns before ``gh pr merge`` is invoked again.
+        with idempotency_scope(None, boundary=boundary):
+            merge_pr(
+                repo,
+                pr,
+                method=method,
+                idempotency_key=merge_action_key,
+                runner=runner,
+            )
+    except ForgeError as exc:
+        return _resume_blocked(result, f"recovered merge request failed: {exc}")
+    # A raw ``MERGED`` observation is enough to suppress a duplicate request, but terminal merged
+    # status still requires the ordinary reconciliation ancestry proof on the next invocation.
+    result.status = "queued"
+    result.merge_state = "QUEUED"
+    result.merged = False
+    return result
+
+
+def _resume_pushed_branch(repo, item, fact, state_store, runner, *, prs=None) -> ItemResult:
+    """Create the missing draft PR from a durable pushed-branch checkpoint.
+
+    This path covers both crashes after the push checkpoint and the narrower crash window after
+    ``git push`` but before that checkpoint was persisted.  It never invokes a Builder: branch,
+    worktree, action identity, and both local/remote heads must agree before the forge call.
+    """
+    result = _resumed_item_result(item, fact)
+    state = state_store.read()
+    lifecycle = state["item_states"][item.id].get("lifecycle", {})
+    if not isinstance(lifecycle, Mapping):
+        return _resume_blocked(result, "pushed-branch recovery lifecycle is missing")
+    raw_checkpoint = lifecycle.get("publication_checkpoint")
+    if not isinstance(raw_checkpoint, Mapping):
+        return _resume_blocked(result, "pushed-branch checkpoint is missing or malformed")
+    try:
+        checkpoint = campaign_state.validate_publication_checkpoint(raw_checkpoint)
+    except campaign_state.StateSchemaError as exc:
+        return _resume_blocked(result, f"pushed-branch checkpoint is missing or malformed: {exc}")
+    payload = {
+        "branch": checkpoint["branch"],
+        "base": checkpoint["pr_base"],
+        "title": checkpoint["title"],
+    }
+    expected_key = campaign_state.stable_action_key(
+        state["campaign_id"], item.id, "open_draft_pr", payload,
+    )
+    if checkpoint["open_action_key"] != expected_key:
+        return _resume_blocked(result, "pushed-branch checkpoint has an inconsistent open action key")
+    if checkpoint["pr_number"] is not None or checkpoint["pr_url"]:
+        return _resume_blocked(result, "pushed-branch checkpoint unexpectedly contains a PR identity")
+    if str(fact.get("branch") or "") != checkpoint["branch"]:
+        return _resume_blocked(result, "pushed-branch branch identity does not match checkpoint")
+    if str(fact.get("worktree") or "") != checkpoint["worktree"]:
+        return _resume_blocked(result, "pushed-branch worktree does not match checkpoint")
+    local_sha = str(fact.get("local_sha") or "").strip()
+    remote_sha = str(fact.get("remote_sha") or "").strip()
+    observed_head = str(fact.get("head_sha") or "").strip()
+    if not local_sha or not remote_sha or local_sha != remote_sha or observed_head != remote_sha:
+        return _resume_blocked(result, "pushed-branch local and remote heads do not agree")
+    if checkpoint["pushed_head_sha"] and checkpoint["pushed_head_sha"] != remote_sha:
+        return _resume_blocked(result, "pushed-branch head differs from checkpoint")
+
+    action = state_store.action(checkpoint["open_action_key"])
+    if action is None:
+        return _resume_blocked(result, "pushed-branch checkpoint has no persisted open intent")
+    if action is not None and action.get("status") == "completed":
+        return _resume_blocked(result, "completed PR action has no matching PR")
+    try:
+        _, action, _ = state_store.begin_action(
+            item.id, "open_draft_pr", payload=payload, key=checkpoint["open_action_key"],
+        )
+        if not checkpoint["pushed_head_sha"]:
+            # The push happened before the state checkpoint could be committed.  Bind that observed
+            # head only after the branch/worktree/local-remote equality checks above.
+            checkpoint = dict(checkpoint)
+            checkpoint["head_sha"] = remote_sha
+            checkpoint["pushed_head_sha"] = remote_sha
+            checkpoint = campaign_state.validate_publication_checkpoint(checkpoint)
+            state_store.update({
+                "item_states": {item.id: {"lifecycle": {
+                    "phase": "pushed",
+                    "publication_checkpoint": checkpoint,
+                    "head_sha": remote_sha,
+                }}},
+            })
+        stub = scrub(
+            f"🚧 Draft — Architect review in progress.\n\n## Goal\n{checkpoint['goal']}\n",
+            env_secrets(),
+        )
+        pr = open_draft_pr(
+            repo,
+            branch=checkpoint["branch"],
+            base=checkpoint["pr_base"],
+            title=checkpoint["title"],
+            body=stub,
+            idempotency_key=checkpoint["open_action_key"],
+            inventory=prs if prs is not None else [],
+            runner=runner,
+        )
+        opened_head = pr.head_sha or remote_sha
+        if opened_head != remote_sha:
+            return _resume_blocked(result, "opened PR head differs from pushed branch head")
+        checkpoint = dict(checkpoint)
+        checkpoint.update({
+            "head_sha": opened_head,
+            "pushed_head_sha": opened_head,
+            "pr_number": pr.number,
+            "pr_url": pr.url,
+        })
+        checkpoint = campaign_state.validate_publication_checkpoint(checkpoint)
+        state_store.update({
+            "item_states": {item.id: {"lifecycle": {
+                "phase": "draft",
+                "publication_checkpoint": checkpoint,
+                "automerge": checkpoint["eligibility"]["eligible"],
+                "eligibility": checkpoint["eligibility"],
+                "autonomy": checkpoint["autonomy"],
+                "merge_method": checkpoint["merge_method"],
+                "assignee": checkpoint["assignee"],
+                "head_sha": opened_head,
+                "pr_number": pr.number,
+            }}},
+        })
+        if action.get("status") != "completed":
+            state_store.complete_action(
+                action["key"], result={"number": pr.number, "url": pr.url,
+                                       "head_sha": opened_head},
+            )
+    except (ForgeError, campaign_state.CampaignStateError) as exc:
+        return _resume_blocked(result, f"pushed-branch PR creation failed: {exc}")
+    row = {
+        "number": pr.number,
+        "url": pr.url,
+        "headRefName": pr.branch,
+        "headRefOid": opened_head,
+        "baseRefName": checkpoint["pr_base"],
+        "title": checkpoint["title"],
+        "state": pr.state or "OPEN",
+        "isDraft": True,
+        "body": stub,
+    }
+    recovered_fact = dict(fact)
+    recovered_fact.update({
+        "phase": "draft", "pr_number": pr.number, "pr_url": pr.url,
+        "head_sha": opened_head, "pr_state": "OPEN", "check_head_sha": "",
+        "checks": [], "forge": {"pr": row},
+    })
+    return _resumed_item_result(item, recovered_fact)
 
 
 def reconcile_stacked_child(repo, pr, *, base, worktree=None, verification_context=None,
@@ -1073,7 +2045,8 @@ def reconcile_stacked_child(repo, pr, *, base, worktree=None, verification_conte
 
 def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_dispatchers,
                            runner, env, trusted, prior, item, publication_barrier=None,
-                           credential_registry=None, state_store=None) -> ItemResult:
+                           credential_registry=None, state_store=None,
+                           context_budget=DEFAULT_CONTEXT_BUDGET) -> ItemResult:
     branch, worktree = _branch(item), ""
     verification_context = None
     try:
@@ -1133,7 +2106,10 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
                     f"{red.reason}"
                 )
         brief = _task_brief(item, overlaps)
-        worker_context = state_store.project(item.id) if state_store is not None else None
+        worker_context = (
+            _bounded_item_context(state_store, item, worktree, budget=context_budget)
+            if state_store is not None else None
+        )
         best = run_implement(
             worktree,
             brief,
@@ -1169,7 +2145,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
         review_round = _final_review_loop(
             worktree, item, roles, profile, review_fn, builder_dispatchers,
             runner, env, trusted, base_sha, verification_context,
-            oracle_snapshot, protected_paths,
+            oracle_snapshot, protected_paths, state_store, context_budget,
         )
 
         # Re-run the complete protected gate after review fixes and derive K/N from the criteria,
@@ -1203,9 +2179,26 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
                                                           (prior[d] for d in item.deps if d in prior))
                         else ""),
         )
+        # Register the PR boundary before invoking the forge. The marker is embedded in the draft
+        # body, allowing a crashed invocation to recover the exact PR even when its state file was
+        # left at ``intent``. A completed intent with no matching PR is corruption and fails closed.
+        open_payload = {"branch": branch, "base": pr_base, "title": item.title}
+        open_key = None
+        open_record = None
+        had_open_record = False
+        if state_store is not None:
+            predicted_key = state_store.action_key(item.id, "open_draft_pr", open_payload)
+            had_open_record = state_store.action(predicted_key) is not None
+            _, open_record, _ = state_store.begin_action(
+                item.id, "open_draft_pr", payload=open_payload,
+            )
+            open_key = open_record["key"]
+            artifacts.goal = f"{artifacts.goal}\n{idempotency_marker(open_key)}"
         # The wave barrier is deliberately after the final review/full gate.  Actual candidate
         # paths can change during repair, and no wave member may create a PR until all final paths
         # have been checked pairwise against the declared areas.
+        autonomy = profile.get("prefs", {}).get("autonomy", "auto-merge")
+        merge_method = "squash"
         changed = _changed_files(worktree, base_sha, runner)
         violations = scope_violations(changed, item)
         if violations:
@@ -1214,28 +2207,151 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             )
         if publication_barrier is not None:
             publication_barrier.wait(item, changed)
-        pr = open_draft(
-            worktree,
+        # This is the crash-safe publication boundary.  It is persisted before either
+        # ``open_draft`` (which pushes and then creates a PR) or ``open_draft_pr`` is invoked.
+        # A later successful forge read patches the same record with the exact pushed head/PR id.
+        preopen_head = _run(["git", "rev-parse", "HEAD"], worktree, runner).strip()
+        preopen_checkpoint = _publication_checkpoint(
             artifacts,
-            base=pr_base,
-            existing_branch=True,
-            sign=False,
-            runner=runner,
+            item=item,
+            worktree=worktree,
+            base_sha=base_sha,
+            pr_base=pr_base,
+            observed_head_sha=preopen_head,
+            autonomy=autonomy,
+            merge_method=merge_method,
+            assignee="@me",
+            open_action_key=open_key or "pending-open-action",
+            changed_files=changed,
+            protected_oracle_paths=protected_paths,
         )
+        if state_store is not None:
+            state_store.update({
+                "item_states": {item.id: {"lifecycle": {
+                    "phase": "publishing",
+                    "automerge": preopen_checkpoint["eligibility"]["eligible"],
+                    "eligibility": preopen_checkpoint["eligibility"],
+                    "autonomy": preopen_checkpoint["autonomy"],
+                    "merge_method": preopen_checkpoint["merge_method"],
+                    "assignee": preopen_checkpoint["assignee"],
+                    "head_sha": preopen_head,
+                    "publication_checkpoint": preopen_checkpoint,
+                }}},
+            })
+        existing_row = None
+        if state_store is not None:
+            current_item = state_store.read()["item_states"][item.id]
+            forge_projection = current_item.get("forge", {})
+            if isinstance(forge_projection, dict):
+                candidate = forge_projection.get("pr")
+                if isinstance(candidate, dict) and candidate.get("number"):
+                    existing_row = candidate
+            if open_record is not None and open_record.get("status") == "completed" and existing_row is None:
+                raise CampaignError(
+                    f"completed PR idempotency action {open_key!r} has no matching forge PR"
+                )
+        if existing_row is not None:
+            pr = _row_pr_ref(existing_row)
+            if pr is None or pr.branch != branch or pr.base != pr_base or pr.title.strip() != item.title.strip():
+                raise CampaignError("reconciled PR object does not match the immutable Plan item")
+        elif open_record is not None and open_record.get("status") == "intent" and had_open_record:
+            # A prior crash may have completed the branch push but not PR creation. Do not attempt
+            # a second commit (which would fail on a clean branch); publish the marker-bearing PR
+            # directly from the already persistent branch.
+            stub = f"🚧 Draft — Architect review in progress.\n\n## Goal\n{artifacts.goal}\n"
+            pr = open_draft_pr(
+                worktree, branch=branch, base=pr_base, title=artifacts.title, body=stub,
+                idempotency_key=open_key, runner=runner,
+            )
+        else:
+            if state_store is None:
+                pr = open_draft(
+                    worktree,
+                    artifacts,
+                    base=pr_base,
+                    existing_branch=True,
+                    sign=False,
+                    idempotency_key=open_key,
+                    runner=runner,
+                )
+            else:
+                # Keep the push and PR-create calls separate so the checkpoint can be patched with
+                # the exact pushed head in the crash window between them.
+                pushed_head = commit_and_push(
+                    worktree, branch, artifacts.title, sign=False, checkout=False, runner=runner,
+                )
+                pushed_checkpoint = dict(preopen_checkpoint)
+                pushed_checkpoint.update({
+                    "head_sha": pushed_head,
+                    "pushed_head_sha": pushed_head,
+                })
+                pushed_checkpoint = campaign_state.validate_publication_checkpoint(
+                    pushed_checkpoint
+                )
+                state_store.update({
+                    "item_states": {item.id: {"lifecycle": {
+                        "phase": "pushed",
+                        "publication_checkpoint": pushed_checkpoint,
+                        "head_sha": pushed_head,
+                    }}},
+                })
+                stub = scrub(
+                    f"🚧 Draft — Architect review in progress.\n\n## Goal\n{artifacts.goal}\n",
+                    env_secrets(),
+                )
+                pr = open_draft_pr(
+                    worktree,
+                    branch=branch,
+                    base=pr_base,
+                    title=artifacts.title,
+                    body=stub,
+                    idempotency_key=open_key,
+                    runner=runner,
+                )
+        if state_store is not None:
+            # Patch the pre-PR checkpoint with the exact pushed revision and forge identity before
+            # any subsequent review/check repair boundary can run.  A crash at this point is now
+            # resumable from the draft PR without spending a second Builder cohort.
+            opened_head = pr.head_sha or _run(["git", "rev-parse", "HEAD"], worktree, runner).strip()
+            opened_checkpoint = dict(preopen_checkpoint)
+            opened_checkpoint.update({
+                "head_sha": opened_head,
+                "pushed_head_sha": opened_head,
+                "pr_number": pr.number,
+                "pr_url": pr.url,
+            })
+            opened_checkpoint = campaign_state.validate_publication_checkpoint(opened_checkpoint)
+            state_store.update({
+                "item_states": {item.id: {"lifecycle": {
+                    "phase": "draft",
+                    "publication_checkpoint": opened_checkpoint,
+                    "head_sha": opened_head,
+                    "pr_number": pr.number,
+                }}},
+            })
+        if (state_store is not None and open_key is not None
+                and open_record is not None and open_record.get("status") != "completed"):
+            state_store.complete_action(
+                open_key, result={"number": pr.number, "url": pr.url, "head_sha": pr.head_sha},
+            )
         seen_feedback: set[str] = set()
         for repair_round in range(1, 6):
+            pushed_head_sha = _run(["git", "rev-parse", "HEAD"], worktree, runner).strip()
             try:
-                wait_for_checks(worktree, pr, runner=runner)
+                wait_for_checks(
+                    worktree, pr, head_revision=pushed_head_sha or pr.head_sha or base_sha,
+                    runner=runner,
+                )
             except ForgeError:
                 _repair_ci(
                     worktree, item, roles, profile, builder_dispatchers,
                     runner, env, trusted, pr, branch, verification_context,
-                    oracle_snapshot, protected_paths,
+                    oracle_snapshot, protected_paths, state_store, context_budget,
                 )
                 review_round = _final_review_loop(
                     worktree, item, roles, profile, review_fn, builder_dispatchers,
                     runner, env, trusted, base_sha, verification_context,
-                    oracle_snapshot, protected_paths,
+                    oracle_snapshot, protected_paths, state_store, context_budget,
                 )
                 artifacts.review = review_round
                 commit_and_push(
@@ -1251,7 +2367,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             repaired, updated_base = _repair_merge_conflict(
                 worktree, item, roles, profile, builder_dispatchers,
                 runner, env, trusted, pr, branch, verification_context,
-                oracle_snapshot, protected_paths,
+                oracle_snapshot, protected_paths, state_store, context_budget,
             )
             if repaired:
                 base_sha = _run(["git", "rev-parse", updated_base], worktree, runner).strip()
@@ -1259,7 +2375,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
                 review_round = _final_review_loop(
                     worktree, item, roles, profile, review_fn, builder_dispatchers,
                     runner, env, trusted, base_sha, verification_context,
-                    oracle_snapshot, protected_paths,
+                    oracle_snapshot, protected_paths, state_store, context_budget,
                 )
                 artifacts.review = review_round
                 status_out = _run(["git", "status", "--porcelain"], worktree, runner)
@@ -1280,6 +2396,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
                 worktree, item, roles, profile, review_fn, builder_dispatchers,
                 runner, env, trusted, pr, branch, base_sha, seen_feedback,
                 verification_context, oracle_snapshot, protected_paths,
+                state_store, context_budget,
             )
             if feedback_review is not None:
                 review_round = feedback_review
@@ -1320,16 +2437,99 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
                 "_error": str(exc),
             }
 
-        handoff = finalize(
-            worktree,
-            pr,
+        # ``gh pr create`` does not return the head OID on every CLI version. Resolve the exact
+        # local head before deriving the durable finalization key so a restart computes the same
+        # key that reconciliation derives from the forge PR head.
+        observed_head_sha = pr.head_sha
+        if not observed_head_sha:
+            observed_head_sha = _run(["git", "rev-parse", "HEAD"], worktree, runner).strip()
+        # Derive tier and eligibility from the final protected evidence.  There is no prior
+        # ItemResult here: the publication checkpoint is the source of truth for restart replay.
+        checkpoint_head = observed_head_sha or base_sha
+        checkpoint = _publication_checkpoint(
             artifacts,
-            autonomy=profile.get("prefs", {}).get("autonomy", "auto-merge"),
+            item=item,
+            worktree=worktree,
+            base_sha=base_sha,
+            pr_base=pr_base,
+            observed_head_sha=checkpoint_head,
+            autonomy=autonomy,
+            merge_method=merge_method,
             assignee="@me",
-            runner=runner,
-            forge_feedback=forge_feedback,
+            open_action_key=open_key or "pending-open-action",
+            changed_files=changed,
+            protected_oracle_paths=protected_paths,
+            pr_number=pr.number,
+            pr_url=pr.url,
+            pushed_head_sha=checkpoint_head,
         )
+        if state_store is not None:
+            # Keep the exact checkpoint alongside the final result for callers that inspect the
+            # state after a successful run.  The same checkpoint is created earlier, before PR
+            # creation, and is patched there with the forge identity/head.
+            state_store.update({
+                "item_states": {item.id: {"lifecycle": {
+                    "phase": "finalizing",
+                    "automerge": checkpoint["eligibility"]["eligible"],
+                    "eligibility": checkpoint["eligibility"],
+                    "autonomy": autonomy,
+                    "merge_method": merge_method,
+                    "assignee": "@me",
+                    "head_sha": checkpoint_head,
+                    "pr_number": pr.number,
+                    "publication_checkpoint": checkpoint,
+                }}},
+            })
+        finalize_key = None
+        finalize_record = None
+        if state_store is not None:
+            finalize_payload = {"pr_number": pr.number, "head_sha": observed_head_sha or base_sha}
+            _, finalize_record, _ = state_store.begin_action(
+                item.id, "finalize_pr", payload=finalize_payload,
+            )
+            finalize_key = finalize_record["key"]
+        def boundary(phase, action, payload):
+            if state_store is None:
+                return None, False
+            if phase == "before":
+                boundary_payload = {
+                    "pr_number": pr.number,
+                    "head_sha": observed_head_sha or base_sha,
+                    "base_sha": base_sha,
+                    "payload": payload,
+                }
+                _, record, skip = state_store.begin_action(
+                    item.id, action, payload=boundary_payload,
+                )
+                return record["key"], skip
+            key = payload.get("key") if isinstance(payload, dict) else None
+            if key:
+                state_store.complete_action(key, result=payload.get("result"))
+            return None
+        # The legacy publish helper has no key parameter; the forge adapter's scoped marker makes
+        # its review comment recoverable while preserving the public publish API.
+        with idempotency_scope(finalize_key, boundary=boundary if state_store is not None else None):
+            handoff = finalize(
+                worktree,
+                pr,
+                artifacts,
+                autonomy=autonomy,
+                merge_method=merge_method,
+                assignee="@me",
+                idempotency_key=finalize_key,
+                runner=runner,
+                forge_feedback=forge_feedback,
+            )
+        if state_store is not None and finalize_key is not None:
+            state_store.complete_action(
+                finalize_key,
+                result={"state": handoff.state, "merged": bool(handoff.merged),
+                        "confirmation": bool(getattr(handoff.confirmation, "confirmed", False))},
+            )
         status = handoff.state
+        confirmation_status = getattr(handoff.confirmation, "status", {})
+        if not isinstance(confirmation_status, dict):
+            confirmation_status = {}
         if handoff.merged:
             with _ROOT_GIT_LOCK:
                 remove_merged_worktree(
@@ -1346,6 +2546,17 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             overlaps=overlaps,
             changed_files=tuple(changed),
             criterion_evidence=dict(evidence),
+            pr_number=pr.number,
+            head_sha=observed_head_sha,
+            pr_state=str(confirmation_status.get("state") or ""),
+            checks=[],
+            check_head_sha=observed_head_sha,
+            merge_state=(
+                "MERGED" if handoff.merged else
+                "QUEUED" if status == "queued" else ""
+            ),
+            merge_commit=_merge_commit_value(confirmation_status),
+            merged_at=str(confirmation_status.get("mergedAt") or ""),
         )
     except Exception as exc:
         if publication_barrier is not None:
@@ -1394,7 +2605,8 @@ def _select_campaign_builders(roles, profile, overrides, *, reviewer_fn, env, ru
 def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_of_n=None, profile=None,
                  reviewer_fn=None, builder_dispatchers=None, item_executor=None,
                  runner=subprocess.run, env=None, trusted=False, parallel=True,
-                 strict=False, state_home=None, campaign_id=None, plan_id=None) -> CampaignResult:
+                 strict=False, state_home=None, campaign_id=None, plan_id=None,
+                 context_budget=DEFAULT_CONTEXT_BUDGET) -> CampaignResult:
     """Run a Plan as dependency-aware parallel PR workstreams.
 
     Users supply only the Plan and a model config:
@@ -1533,6 +2745,44 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
         repo, plan, runner, home=state_home, campaign_id=campaign_id, plan_id=plan_id,
         refresh_base=item_executor is None,
     )
+    resume_snapshot = None
+    # Read-first restart barrier: all canonical, local, remote, PR, head/check, queue, and merge
+    # evidence is collected before the first worktree/branch/forge mutation in this invocation.
+    # Offline callback fixtures intentionally remain state-free and skip this production barrier.
+    if (state_store is not None and item_executor is None
+            and Path(repo).is_dir() and (Path(repo) / ".git").exists()):
+        resume_snapshot = reconcile_campaign(
+            repo, plan, state_store=state_store, home=state_home, runner=runner,
+        )
+
+    # Completed forge boundaries are terminal observations. Do not invoke a Builder or recreate a
+    # PR for them on restart; dependents still wait for an explicit confirmed merge.
+    if resume_snapshot is not None:
+        for item in list(pending):
+            fact = resume_snapshot["items"].get(item.id, {})
+            phase = fact.get("phase")
+            lifecycle = state_store.read()["item_states"][item.id].get("lifecycle", {})
+            has_pushed_checkpoint = (
+                isinstance(lifecycle, Mapping)
+                and "publication_checkpoint" in lifecycle
+                and str(lifecycle.get("phase") or "") in {"publishing", "pushed"}
+            )
+            if phase in {"remote_branch", "local_branch", "worktree"} and has_pushed_checkpoint:
+                # A push/PR-create crash is recoverable from the immutable checkpoint.  This is
+                # deliberately before the normal dependency scheduler, so no Builder is rerun.
+                results[item.id] = _resume_pushed_branch(
+                    repo, item, fact, state_store, runner, prs=resume_snapshot.get("prs", []),
+                )
+                continue
+            if phase not in {"merged", "draft", "ready", "queued"}:
+                continue
+            # These boundaries are already owned by a reconciled PR. Never spend a fresh Builder
+            # cohort on them; retain ready/queued as non-terminal so a later invocation rechecks
+            # forge state and can observe a confirmed merge.
+            results[item.id] = _resume_finalization_boundary(
+                repo, item, fact, state_store, runner,
+            )
+        pending = [item for item in pending if item.id not in results]
 
     while pending:
         failed_ids = {iid for iid, result in results.items() if result.status in {"failed", "blocked"}}
@@ -1606,6 +2856,7 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
                 publication_barrier=publication_barrier,
                 credential_registry=credential_registry,
                 state_store=state_store,
+                context_budget=context_budget,
             )
 
         with ThreadPoolExecutor(max_workers=min(len(wave), 8)) as pool_executor:
@@ -1652,6 +2903,14 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
                     "pr_url": result.pr_url,
                     "merged": result.merged,
                     "changed_files": list(result.changed_files),
+                    "pr_number": result.pr_number,
+                    "head_sha": result.head_sha,
+                    "pr_state": result.pr_state,
+                    "checks": list(result.checks),
+                    "check_head_sha": result.check_head_sha,
+                    "merge_state": result.merge_state,
+                    "merge_commit": result.merge_commit,
+                    "merged_at": result.merged_at,
                 }
                 evidence_updates[item.id] = dict(result.criterion_evidence or {})
                 observation_updates[item.id] = {

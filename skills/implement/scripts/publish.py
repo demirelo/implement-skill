@@ -9,8 +9,9 @@ it."""
 import subprocess
 from dataclasses import dataclass
 
-from gh import (commit_and_push, open_draft_pr, update_body, post_comment, mark_ready,
-                merge_pr, confirm_merge, feedback_blockers, assign_pr, PrRef, ForgeError)
+from gh import (commit_and_push, idempotency_marker, open_draft_pr, update_body, post_comment,
+                mark_ready, merge_pr, confirm_merge, feedback_blockers, assign_pr, PrRef,
+                ForgeError)
 from handoff import tier, render_pr_body, render_review_comment
 from scrub import scrub, env_secrets
 
@@ -51,19 +52,38 @@ def _secrets(secrets):
     return list(env_secrets() if secrets is None else secrets)
 
 
+def _action_key(key, action):
+    """Validate and derive a stable child key for one externally visible action."""
+    if not isinstance(key, str) or not key.strip():
+        raise ForgeError(f"{action} requires a non-empty idempotency key")
+    key = key.strip()
+    idempotency_marker(key)
+    child = f"{key}-{action}"
+    idempotency_marker(child)
+    return child
+
+
 def open_draft(repo, artifacts, *, base="main", sign=True, existing_branch=False,
-               secrets=None, runner=subprocess.run) -> PrRef:
+               secrets=None, idempotency_key=None, inventory=None,
+               runner=subprocess.run) -> PrRef:
     sec = _secrets(secrets)
+    # Validate before committing/pushing. A retryable PR create without a durable key could leave
+    # an untracked branch behind even when the eventual forge call is rejected.
+    _action_key(idempotency_key, "open-draft")
     commit_and_push(repo, artifacts.branch, artifacts.title, sign=sign,
                     checkout=not existing_branch, runner=runner)
     stub = scrub(f"🚧 Draft — Architect review in progress.\n\n## Goal\n{artifacts.goal}\n", sec)
     return open_draft_pr(repo, branch=artifacts.branch, base=base,
-                         title=artifacts.title, body=stub, runner=runner)
+                         title=artifacts.title, body=stub,
+                         idempotency_key=idempotency_key, inventory=inventory, runner=runner)
 
 
 def finalize(repo, pr, artifacts, *, autonomy="auto-merge", merge_method="squash",
-             assignee=None, secrets=None, runner=subprocess.run, forge_feedback=None) -> Handoff:
+             assignee=None, secrets=None, idempotency_key=None, runner=subprocess.run,
+             forge_feedback=None) -> Handoff:
     sec = _secrets(secrets)
+    review_key = _action_key(idempotency_key, "review-comment")
+    blocker_key = _action_key(idempotency_key, "forge-blocker-comment")
     # 0/0 acceptance is a false green (same class as the H5 re_gate guard) — never tier it green
     evidence = artifacts.acceptance_evidence
     if evidence is not None:
@@ -87,13 +107,15 @@ def finalize(repo, pr, artifacts, *, autonomy="auto-merge", merge_method="squash
                                 acceptance_evidence=evidence,
                                 acceptance_ids=artifacts.acceptance_ids), sec)
     update_body(repo, pr, body, runner=runner)
-    post_comment(repo, pr, scrub(render_review_comment(artifacts.review), sec), runner=runner)
+    post_comment(repo, pr, scrub(render_review_comment(artifacts.review), sec),
+                 idempotency_key=review_key, runner=runner)
     blockers = feedback_blockers(forge_feedback) if forge_feedback is not None else []
     if blockers:
         post_comment(
             repo,
             pr,
             scrub("## Forge lifecycle blocker\n\n" + "\n".join(f"- {x}" for x in blockers), sec),
+            idempotency_key=blocker_key,
             runner=runner,
         )
         return Handoff(tier=label, merged=False, state="blocked", reason="; ".join(blockers))
