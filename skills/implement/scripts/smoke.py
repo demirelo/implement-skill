@@ -32,6 +32,19 @@ FIX_DIFF = """--- a/calculator.py
 """
 
 
+def _fake_model_output(argv, diff):
+    if argv and argv[0] == "claude":
+        model = argv[argv.index("--model") + 1]
+        return json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "model": model,
+            "result": diff,
+        })
+    return diff
+
+
 def _run(argv, cwd):
     return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=60)
 
@@ -77,9 +90,11 @@ def create_repo(root: Path) -> Path:
 
 class FakeRun:
     def __call__(self, argv, **kw):
+        output = _fake_model_output(argv, FIX_DIFF)
+
         class P:
             returncode = 0
-            stdout = FIX_DIFF
+            stdout = output
             stderr = ""
 
         return P()

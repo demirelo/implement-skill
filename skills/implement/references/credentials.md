@@ -37,11 +37,12 @@ consume (the route's `cred_provider`), so **one** key can light up a whole panel
 `~/.config/implement/config.json`. `load_profile` reads that; it overrides the tracked seed. So your
 real coordinates stay on your machine, and the repo stays a clean template forever.
 
-`team_dispatch.py` honors the same file: at dispatch time it **overlays your profile's `op` credential
-refs over the tracked template** (`overlay_profile_credentials`), so the credentials preflight
-validated are exactly the ones dispatch resolves — env keys still win first. Unknown providers you add
-to the pool (say, grok) dispatch through the openrouter route with an explicit model slug; the panel
-is config, not a hardcoded list.
+`team_dispatch.py` honors the same file: at dispatch time it overlays the complete non-secret source
+declaration (`env`, `.env`, keychain, or `op`) and delegates resolution to `resolvers.resolve`, so
+readiness and direct CLI dispatch share one resolver. When a parent dispatcher supplies a resolved
+credential, its canonical child environment variable wins and no helper is called again. Unknown
+providers you add to the pool (say, grok) dispatch through the openrouter route with an explicit model
+slug; the panel is config, not a hardcoded list.
 
 ## If you must edit the tracked seed
 

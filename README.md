@@ -104,8 +104,8 @@ Seatbelt sandbox out of the box; on Linux, install Docker for the sandbox.
 /implement
 Plan: <attached>
 Models:
-  builders: [minimax, luna]
-  reviewer: sol
+  builders: [minimax, kimi]
+  reviewer: muse
   best_of_n: 2
 ```
 
@@ -153,8 +153,10 @@ secret values: `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`/`MOONSHOT_A
 routes those Builders directly to their provider APIs so Codex runs do not fall into placeholder
 1Password/OpenRouter config.
 
-Models backed by the running host use the host callback seam; script-dispatchable models use the
-configured pool and credential sources.
+The configured model IDs above are installed seed IDs from `skills/implement/scripts/models.json`.
+The Codex quickstart below uses native `luna` (`gpt-5.6-luna`, `xhigh`) as Builder and `muse`
+(`meta/muse-spark-1.3`) as the OpenRouter Reviewer. Script-dispatchable models use the same
+resolver for readiness and scoped child-process credentials.
 
 ### Or call a campaign directly from Python
 
@@ -166,11 +168,16 @@ plan = {"goal": "ship the attached Plan", "items": [...]}  # normalized Plan ite
 result = run_campaign(
     "/path/to/your/repo",
     plan,
-    models={"builders": ["minimax", "luna"], "reviewer": "sol", "best_of_n": 2},
+    models={"builders": ["minimax"], "reviewer": "muse", "best_of_n": 1},
 )
 print(result.complete, result.total, result.progress)
 PY
 ```
+
+For the native Codex Luna path, invoke `$implement` in Codex with `builders: [luna]`; the host
+supplies `builder_dispatchers={"luna": <host callback>}`. That callback must implement `preflight()`
+and return `{"model": "gpt-5.6-luna", "finish_reason": "stop", "content": "..."}` for each
+prompt. The runtime validates that envelope before consuming it.
 
 A repo is **untrusted unless you pass `trusted=True`** — untrusted runs require a sandbox backend.
 

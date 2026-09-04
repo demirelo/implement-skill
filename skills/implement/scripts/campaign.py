@@ -34,8 +34,9 @@ from gh import (
     wait_for_checks,
 )
 from implement import run_implement
+from backends import make_dispatcher
 from profile import load_profile
-from preflight import readiness
+from preflight import readiness, preflight_host_callbacks, wrap_host_callback
 from publish import RunArtifacts, finalize, open_draft
 from review import build_final_review_prompt, parse_final_review
 from seed import default_profile
@@ -43,6 +44,7 @@ from workspace import create_branch_worktree, remove_merged_worktree
 from sandbox import available_backends
 from verification import VerificationContext
 from guard import classify
+from resolvers import Cred
 from oracle import (
     AcceptanceCriterion,
     AuthoredTest,
@@ -537,9 +539,14 @@ def _has_test_change(paths) -> bool:
     )
 
 
-def _reviewer(profile, reviewer, override, runner):
+def _reviewer(profile, reviewer, override, runner, *, credential=None, env=None):
     if override is not None:
-        return override
+        entry = profile.get("pool", {}).get(reviewer, {})
+        expected_model = entry.get("model", reviewer)
+        return wrap_host_callback(
+            override, expected_model, role="Reviewer",
+            require_envelope=entry.get("backend") == "codex_mcp",
+        )
     entry = profile.get("pool", {}).get(reviewer)
     if entry is None:
         raise CampaignError(f"Reviewer model {reviewer!r} is not in the configured pool")
@@ -547,7 +554,7 @@ def _reviewer(profile, reviewer, override, runner):
         raise CampaignError(
             f"Reviewer {reviewer!r} is orchestrator-only; provide reviewer_fn from the host agent"
         )
-    return make_arch_dispatcher(entry, runner=runner)
+    return make_arch_dispatcher(entry, runner=runner, credential=credential, env=env)
 
 
 def _require_verification_context(worktree, verification_context):
@@ -1026,7 +1033,8 @@ def reconcile_stacked_child(repo, pr, *, base, worktree=None, verification_conte
 
 
 def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_dispatchers,
-                           runner, env, trusted, prior, item, publication_barrier=None) -> ItemResult:
+                           runner, env, trusted, prior, item, publication_barrier=None,
+                           credential_registry=None) -> ItemResult:
     branch, worktree = _branch(item), ""
     verification_context = None
     try:
@@ -1113,7 +1121,10 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             raise CampaignError(
                 "changed files outside declared Plan item scope: " + ", ".join(violations)
             )
-        review_fn = _reviewer(profile, roles.reviewer, reviewer_fn, runner)
+        review_fn = _reviewer(
+            profile, roles.reviewer, reviewer_fn, runner,
+            credential=(credential_registry or {}).get(roles.reviewer), env=env,
+        )
         review_round = _final_review_loop(
             worktree, item, roles, profile, review_fn, builder_dispatchers,
             runner, env, trusted, base_sha, verification_context,
@@ -1309,7 +1320,8 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             verification_context.close()
 
 
-def _select_campaign_builders(roles, profile, overrides, *, reviewer_fn, env, runner, strict):
+def _select_campaign_builders(roles, profile, overrides, *, reviewer_fn, env, runner, strict,
+                              credential_registry=None):
     """Preflight the FULL Builder pool and pick the live ones. DEFAULT: reserves substitute for
     unavailable primaries; STRICT: any unavailable is a hard error (no substitution). The Reviewer is
     always required (it does the adversarial review) unless a reviewer_fn is injected. Returns
@@ -1319,7 +1331,8 @@ def _select_campaign_builders(roles, profile, overrides, *, reviewer_fn, env, ru
         "architects": [] if reviewer_fn is not None else [roles.reviewer],
         "builders": [x for x in roles.builders if x not in overrides],   # probe the whole pool
     }
-    rows = readiness(selected, env=env, runner=runner)
+    rows = readiness(selected, env=env, runner=runner,
+                     credential_registry=credential_registry)
     live_map = {x.model: x.live for x in rows}
     if reviewer_fn is None and not live_map.get(roles.reviewer, False):
         raise CampaignError(f"Reviewer model unavailable: {roles.reviewer}")
@@ -1350,6 +1363,14 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
     plan = CampaignPlan.from_value(plan)
     if not plan.items:
         raise CampaignError("Plan contains no implementation items")
+    # Validate host-owned model bridges before profile readiness probes, worktree creation, or any
+    # callback invocation.  Plain callable seams remain backwards compatible; bridge objects may
+    # provide a cheap preflight/is_available hook that fails closed here.
+    preflight_host_callbacks({
+        "Reviewer": reviewer_fn,
+        **{f"Builder:{name}": callback
+           for name, callback in (builder_dispatchers or {}).items()},
+    })
     _validate_ref(plan.base, "Plan base branch")
     without_acceptance = []
     for item in plan.items:
@@ -1385,12 +1406,70 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
         raise CampaignError(f"Builder model(s) not configured: {missing_builders}")
     if roles.reviewer not in pool and reviewer_fn is None:
         raise CampaignError(f"Reviewer model not configured: {roles.reviewer}")
+    missing_host_builders = [
+        model for model in roles.builders
+        if pool.get(model, {}).get("backend") == "codex_mcp" and model not in overrides
+    ]
+    if missing_host_builders:
+        raise CampaignError(
+            "native Codex Builder callback required before worktree creation: "
+            + ", ".join(missing_host_builders)
+        )
+    if (reviewer_fn is None and pool.get(roles.reviewer, {}).get("backend") == "codex_mcp"):
+        raise CampaignError(
+            "native Codex Reviewer callback required before worktree creation: "
+            + roles.reviewer
+        )
+    try:
+        native_callbacks = {
+            f"Builder:{model}": overrides[model]
+            for model in roles.builders
+            if pool.get(model, {}).get("backend") == "codex_mcp" and model in overrides
+        }
+        if (reviewer_fn is not None
+                and pool.get(roles.reviewer, {}).get("backend") == "codex_mcp"):
+            native_callbacks["Reviewer"] = reviewer_fn
+        preflight_host_callbacks(native_callbacks, require_bridge=True)
+        for model in roles.builders:
+            entry = pool.get(model, {})
+            if entry.get("backend") == "codex_mcp" and model in overrides:
+                wrap_host_callback(
+                    overrides[model], entry.get("model", model), role=f"Builder:{model}",
+                    require_envelope=True,
+                )
+        if reviewer_fn is not None and pool.get(roles.reviewer, {}).get("backend") == "codex_mcp":
+            entry = pool[roles.reviewer]
+            wrap_host_callback(
+                reviewer_fn, entry.get("model", roles.reviewer), role="Reviewer",
+                require_envelope=True,
+            )
+    except RuntimeError as exc:
+        raise CampaignError(str(exc)) from exc
     degraded_builders: tuple = ()
+    credential_registry: dict[str, Cred] = {}
+    dispatchers = dict(overrides)
     if item_executor is None:
         # DEGRADE: substitute reserves for unavailable primaries (default), or fail on any
         # unavailable (strict). Dropped models flow to CampaignResult.degraded_builders → summary.
         roles, degraded_builders = _select_campaign_builders(
-            roles, profile, overrides, reviewer_fn=reviewer_fn, env=env, runner=runner, strict=strict)
+            roles, profile, overrides, reviewer_fn=reviewer_fn, env=env, runner=runner, strict=strict,
+            credential_registry=credential_registry)
+        prefs = profile.get("prefs", {})
+        for model in roles.active_builders:
+            if model in dispatchers:
+                continue
+            entry = pool.get(model, {})
+            if entry.get("backend") not in {"team_dispatch", "claude_headless"}:
+                continue
+            dispatchers[model] = make_dispatcher(
+                entry,
+                effort=prefs.get("effort", "low"),
+                max_tokens=prefs.get("max_tokens", 32000),
+                temperature=prefs.get("temperature", 0.3),
+                runner=runner,
+                credential=credential_registry.get(model),
+                env=env,
+            )
 
     results: dict[str, ItemResult] = {}
     pending = list(plan.items)
@@ -1457,9 +1536,10 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
             if item_executor is not None:
                 return item_executor(item, roles, prior)
             return _default_item_executor(
-                repo, plan, roles, profile, reviewer_fn, overrides,
+                repo, plan, roles, profile, reviewer_fn, dispatchers,
                 runner, env, trusted, prior, item,
                 publication_barrier=publication_barrier,
+                credential_registry=credential_registry,
             )
 
         with ThreadPoolExecutor(max_workers=min(len(wave), 8)) as pool_executor:

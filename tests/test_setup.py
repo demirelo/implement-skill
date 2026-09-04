@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
@@ -20,6 +21,23 @@ def test_credential_source_op_keychain_ref():
     assert src == {"source": "op", "ref": "op://vault/x/credential"}
 
 
+def test_credential_source_keychain_does_not_put_secret_in_argv():
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return _AlwaysLiveRunner()([], **kwargs)
+
+    src = credential_source("deepseek", method="keychain",
+                            input_fn=lambda _: "unused", getpass_fn=lambda _: "sentinel-secret",
+                            runner=runner)
+    assert src == {"source": "keychain", "service": "implement-deepseek"}
+    argv, kwargs = calls[0]
+    assert "sentinel-secret" not in argv
+    assert kwargs["input"] == "sentinel-secret"
+    assert argv[-1] == "-w"
+
+
 def test_interactive_setup_builds_profile_from_scripted_answers():
     # scripted answers: include openrouter? yes; method? env; var name; panels? accept default
     # provider, method, var-name, blank=done-adding, accept-panels
@@ -38,7 +56,11 @@ class _AlwaysLiveRunner:
     def __call__(self, argv, **kw):
         class P:
             returncode = 0
-            stdout = "ok"
+            model = argv[argv.index("--model") + 1] if "--model" in argv else ""
+            stdout = (json.dumps({
+                "type": "result", "subtype": "success", "is_error": False,
+                "modelUsage": {model: {}}, "result": "ok",
+            }) if argv and argv[0] == "claude" else "ok")
             stderr = ""
         return P()
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from gate import detect_adapter, oracle_paths
 from execute import run_best_of_n
-from preflight import readiness, enforce_privacy
+from preflight import readiness, enforce_privacy, preflight_host_callbacks, wrap_host_callback
 from backends import make_dispatcher, PrivacyViolation, UnsupportedBackend
 from profile import load_profile
 from seed import default_profile
@@ -54,6 +54,30 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     if profile is None:
         profile = load_profile(start=start, home=home) or default_profile(_MODELS, _PROVIDERS)
     dispatcher_overrides = dispatcher_overrides or {}
+    # Host bridges must prove availability before adapter detection, gate setup, or any Builder
+    # callback can spend a model turn.  Plain callable overrides remain compatible; bridge objects
+    # can expose the cheap preflight hook validated here.
+    preflight_host_callbacks({f"Builder:{name}": callback
+                              for name, callback in dispatcher_overrides.items()})
+    selected_models = list(builders) if builders is not None else list(
+        profile.get("panels", {}).get("builders", [])
+    )
+    missing_host = [
+        model for model in selected_models
+        if profile.get("pool", {}).get(model, {}).get("backend") == "codex_mcp"
+        and model not in dispatcher_overrides
+    ]
+    if missing_host:
+        raise RuntimeError(
+            "native Codex Builder callback required before dispatch: " + ", ".join(missing_host)
+        )
+    native_callbacks = {
+        f"Builder:{model}": dispatcher_overrides[model]
+        for model in selected_models
+        if profile.get("pool", {}).get(model, {}).get("backend") == "codex_mcp"
+        and model in dispatcher_overrides
+    }
+    preflight_host_callbacks(native_callbacks, require_bridge=True)
     if builders is not None:
         requested = list(dict.fromkeys(builders))
         if not requested:
@@ -78,7 +102,9 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     suit = assess_suitability(adapter=adapter, acceptance_tests=acceptance_tests)
     if not suit.autonomous_ok:
         raise RuntimeError("refusing autonomous run (no objective oracle): " + "; ".join(suit.reasons))
-    live = {r.model: r.live for r in readiness(profile, env=env, runner=runner)}
+    credentials = {}
+    ready_rows = readiness(profile, env=env, runner=runner, credential_registry=credentials)
+    live = {r.model: r.live for r in ready_rows}
     pool, panels = profile.get("pool", {}), profile.get("panels", {})
     prefs = profile.get("prefs", {})
 
@@ -86,7 +112,8 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
         return make_dispatcher(pool[model], effort=prefs.get("effort", "low"),
                                max_tokens=prefs.get("max_tokens", 32000),
                                temperature=prefs.get("temperature", 0.3),
-                               privacy=privacy, runner=runner)
+                               privacy=privacy, runner=runner,
+                               credential=credentials.get(model), env=env)
 
     ledger_path = ledger_path or outcomes.default_path(home=home)
     bucket = features.bucket(task_brief, adapter)
@@ -128,7 +155,12 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     dispatchers = {}
     for model in live_builders:
         if model in dispatcher_overrides:
-            dispatchers[model] = dispatcher_overrides[model]
+            entry = pool.get(model, {})
+            expected_model = entry.get("model", model)
+            dispatchers[model] = wrap_host_callback(
+                dispatcher_overrides[model], expected_model, role=f"Builder:{model}",
+                require_envelope=entry.get("backend") == "codex_mcp",
+            )
         else:
             dispatchers[model] = _dispatcher(model)
 

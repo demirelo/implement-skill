@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Callable
 
 from execute import DispatchError
+from backends import validate_claude_response
 from preflight import readiness
+from resolvers import Cred, scoped_child_env
 from scrub import scrub, env_secrets
 
 _DISPATCH = Path(__file__).parent / "team_dispatch.py"
@@ -52,7 +54,8 @@ def _entry_effort(entry: dict, fallback: str) -> str:
 
 def make_arch_dispatcher(entry: dict, *, effort: str = "high", max_tokens: int = 32000,
                          temperature: float = 0.2, secrets=None,
-                         runner=subprocess.run) -> Callable[[str], str]:
+                         runner=subprocess.run, credential: Cred | None = None,
+                         env: dict | None = None) -> Callable[[str], str]:
     runner = subprocess.run if runner is None else runner   # None means the real runner (smoke --live)
     backend = entry.get("backend")
     dispatch_effort = _entry_effort(entry, effort)
@@ -64,21 +67,28 @@ def make_arch_dispatcher(entry: dict, *, effort: str = "high", max_tokens: int =
         if entry.get("model"):
             argv += ["--model", entry["model"]]
     elif backend == "claude_headless":
-        argv = ["claude", "-p", "--model", entry["model"], "--effort", dispatch_effort]
+        argv = ["claude", "-p", "--model", entry["model"], "--effort", dispatch_effort,
+                "--output-format", "json"]
     else:
         raise UnsupportedArchBackend(f"backend {backend!r} is not script-dispatchable")
+    child_env = scoped_child_env(credential, entry, env)
+    secret_values = [credential.key] if credential is not None else []
 
     def fn(prompt: str) -> str:
         # An Architect prompt carries repo source / gate output / the winner diff — scrub it at
         # this outbound boundary exactly as the Builder path does (execute._build_prompt), so a
         # secret living in the repo never reaches the provider.
-        sec = env_secrets() if secrets is None else secrets
-        proc = runner(argv, input=scrub(prompt, list(sec)),
-                      capture_output=True, text=True, timeout=650)
+        sec = list(env_secrets() if secrets is None else secrets) + secret_values
+        proc = runner(argv, input=scrub(prompt, sec),
+                      capture_output=True, text=True, timeout=650, env=child_env)
         if proc.returncode != 0 or not proc.stdout.strip():
             raise DispatchError(
-                f"{backend} dispatch failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}")
-        return proc.stdout   # RAW — an Architect judgment is prose/JSON, never diff-extracted
+                f"{backend} dispatch failed (rc={proc.returncode}): "
+                f"{scrub((proc.stderr or '').strip()[:200], sec)}")
+        output = proc.stdout
+        if backend == "claude_headless":
+            output = validate_claude_response(output, entry["model"])
+        return scrub(output, sec)   # prose/JSON, never diff-extracted
     return fn
 
 
