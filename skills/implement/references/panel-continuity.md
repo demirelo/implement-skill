@@ -52,6 +52,13 @@ After each useful response, update the ledger with:
 - The tests/CI evidence tied to the decision.
 - Any provider-specific failure mode to avoid next time.
 
+Campaign item workers use the canonical manager projection rather than this historical panel
+slice.  Their context contains only the immutable item spec, their current item namespace,
+criterion evidence, locked interfaces, relevant decisions/blockers, and latest observation.  The
+projection is fresh for every item and never includes an inherited transcript, raw events, or git
+history.  This keeps continuity useful for human/on-demand scouting without allowing audit tails
+to become hidden Builder instructions.
+
 ## Reviews Stay Fresh
 
 PR review is different from Builder continuity. For independent review, use fresh stateless passes
@@ -69,15 +76,20 @@ State is **durable** per repo under `~/.config/implement/panels/<repo-slug>/` (b
 - `panel-brief.md` — objective, branch/PR map, acceptance criteria, accepted decisions.
 - `events.jsonl` — append-only source of truth (`decision`, `rejected`, `invariant`, `review`,
   `provider_note`, `delta`, `run`, `pr`).
+- `campaign-state.json` — manager-owned schema-validated campaign projection.  It is revisioned
+  and atomically written separately from `events.jsonl`; item workers may patch only their own
+  namespace.
 - `providers/<model>.md` — per-model ledgers; `pack()` reads ONLY the target model's ledger, so
   Kimi's security memory never leaks into DeepSeek's prompt.
 
 Everything is scrubbed **before** it touches disk and again at the outbound prompt boundary.
-`run_implement` auto-activates: if a panel exists for the repo, each Builder's prompt gets its
+Standalone `run_implement` auto-activates: if a panel exists for the repo, each Builder's prompt gets its
 packed slice (role reminder + pinned invariants + brief head + its ledger tail + delta, char-
 budgeted, oldest trimmed first) and the run outcome + tried-and-reverted approaches are recorded
 back. No panel → byte-identical stateless prompts, nothing spawned. Review freshness is
 structural: `arch.py` never imports `continuity`; `record_review()` runs post-verdict only.
+When a campaign passes `worker_context`, that canonical projection takes precedence and continuity
+events are not packed into the Builder prompt.
 
 ## Commands
 

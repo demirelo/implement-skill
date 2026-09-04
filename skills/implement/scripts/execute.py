@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import os
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -362,12 +363,27 @@ def _diff_size(diff) -> int:
 def run_best_of_n(repo_path, task_brief, adapter, dispatchers, max_turns=6, secrets=None,
                   crit=None, panel_context=None, repo_ctx=None,
                   force_turn=False, required_paths=(), required_paths_must_change=True,
-                  verification_context=None, protected_oracle_paths=()) -> BestResult:
+                  verification_context=None, protected_oracle_paths=(), worker_context=None) -> BestResult:
     verification_context = _validate_verification_context(repo_path, adapter, verification_context)
     runtime_secrets = list(verification_context.secret_values)
     secrets = runtime_secrets if secrets is None else list(secrets)
     secrets = list(dict.fromkeys([*secrets, *runtime_secrets]))
-    panel_context = panel_context or {}
+    # A canonical campaign projection is already bounded and manager-selected.  Keep it separate
+    # from the legacy panel_context argument so callers cannot accidentally combine it with an
+    # inherited event-log/transcript tail.
+    if worker_context is not None:
+        if isinstance(worker_context, str):
+            worker_context_text = worker_context
+        else:
+            worker_context_text = json.dumps(
+                worker_context, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
+        panel_context = {
+            name: "## Canonical item state (bounded worker projection)\n" + worker_context_text
+            for name in dispatchers
+        }
+    else:
+        panel_context = panel_context or {}
     # Each candidate competes in its OWN isolated copy of the repo, created + torn down inside its own
     # thread — the copies are independent (no shared git lock), so creation parallelizes with the loop
     # and every candidate is graded against the same safe materialization (tracked + non-secret

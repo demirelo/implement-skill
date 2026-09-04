@@ -56,6 +56,7 @@ from oracle import (
     protect_oracle,
     validate_criteria,
 )
+import campaign_state
 
 _HERE = Path(__file__).resolve().parent
 _MODELS = json.loads((_HERE / "models.json").read_text())
@@ -188,6 +189,9 @@ class ItemResult:
     error: str = ""
     overlaps: list = field(default_factory=list)
     changed_files: tuple[str, ...] = ()
+    # Criterion-linked evidence from the final protected gate.  Kept at the end for positional
+    # constructor compatibility with existing integrations.
+    criterion_evidence: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1002,6 +1006,41 @@ def _base_for_item(plan, item, prior, runner, repo):
     )
 
 
+def _initial_campaign_state(repo, plan, runner, *, home=None, campaign_id=None, plan_id=None,
+                            refresh_base=False):
+    """Open manager-owned state when a real checkout can provide an immutable base SHA.
+
+    Offline ``item_executor`` callers often use a symbolic repository path (the long-standing
+    test seam), so those runs remain state-free.  Production callers refresh ``origin/<base>``
+    first and bind state to that exact fetched SHA.  A real repository fails closed if it has a
+    conflicting existing Plan/base identity; it never silently replaces canonical state.
+    """
+    root = Path(repo)
+    # Keep the long-standing offline callback seam state-free.  A directory that is merely a
+    # temporary fixture is not a campaign repository until it has Git metadata; real worktrees
+    # (including linked worktrees, whose ``.git`` is a file) still initialize canonical state.
+    if not root.is_dir() or (not (root / ".git").exists() and not refresh_base):
+        return None
+    if refresh_base:
+        base_ref = _sync_base(repo, plan.base, runner)
+        base_sha = _run(["git", "rev-parse", base_ref], repo, runner).strip()
+    else:
+        base_sha = ""
+        for ref in (f"origin/{plan.base}", plan.base, "HEAD"):
+            try:
+                candidate = _run(["git", "rev-parse", ref], repo, runner).strip()
+            except CampaignError:
+                continue
+            if candidate:
+                base_sha = candidate
+                break
+    if not base_sha:
+        raise CampaignError("cannot initialize canonical campaign state without a base SHA")
+    return campaign_state.ensure_campaign_state(
+        repo, plan, base_sha, home=home, campaign_id=campaign_id, plan_id=plan_id,
+    )
+
+
 def reconcile_stacked_child(repo, pr, *, base, worktree=None, verification_context=None,
                             fresh_review=None, recheck=None, runner=subprocess.run) -> bool:
     """Retarget a stacked child only after its parent has merged.
@@ -1034,7 +1073,7 @@ def reconcile_stacked_child(repo, pr, *, base, worktree=None, verification_conte
 
 def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_dispatchers,
                            runner, env, trusted, prior, item, publication_barrier=None,
-                           credential_registry=None) -> ItemResult:
+                           credential_registry=None, state_store=None) -> ItemResult:
     branch, worktree = _branch(item), ""
     verification_context = None
     try:
@@ -1094,6 +1133,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
                     f"{red.reason}"
                 )
         brief = _task_brief(item, overlaps)
+        worker_context = state_store.project(item.id) if state_store is not None else None
         best = run_implement(
             worktree,
             brief,
@@ -1108,6 +1148,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             required_paths=item.required_paths,
             verification_context=verification_context,
             protected_oracle_paths=protected_paths,
+            worker_context=worker_context,
         )
         if not best.winner or not best.applied:
             raise CampaignError("no Builder candidate produced an applicable green implementation")
@@ -1304,6 +1345,7 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             merged=handoff.merged,
             overlaps=overlaps,
             changed_files=tuple(changed),
+            criterion_evidence=dict(evidence),
         )
     except Exception as exc:
         if publication_barrier is not None:
@@ -1352,7 +1394,7 @@ def _select_campaign_builders(roles, profile, overrides, *, reviewer_fn, env, ru
 def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_of_n=None, profile=None,
                  reviewer_fn=None, builder_dispatchers=None, item_executor=None,
                  runner=subprocess.run, env=None, trusted=False, parallel=True,
-                 strict=False) -> CampaignResult:
+                 strict=False, state_home=None, campaign_id=None, plan_id=None) -> CampaignResult:
     """Run a Plan as dependency-aware parallel PR workstreams.
 
     Users supply only the Plan and a model config:
@@ -1485,6 +1527,12 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
     missing_deps = {d for x in pending for d in x.deps if d not in by_id}
     if missing_deps:
         raise CampaignError(f"unknown Plan dependencies: {sorted(missing_deps)}")
+    # Initialize manager-owned canonical state before any workstream starts.  The append-only
+    # continuity event log remains a separate audit/on-demand surface.
+    state_store = _initial_campaign_state(
+        repo, plan, runner, home=state_home, campaign_id=campaign_id, plan_id=plan_id,
+        refresh_base=item_executor is None,
+    )
 
     while pending:
         failed_ids = {iid for iid, result in results.items() if result.status in {"failed", "blocked"}}
@@ -1497,6 +1545,11 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
                 status="blocked",
                 error="dependency failed or was blocked",
             )
+            if state_store is not None:
+                state_store.transition(
+                    item.id, "blocked", error=results[item.id].error,
+                    observation={"phase": "dependency_blocked", "item_id": item.id},
+                )
         blocked_ids = {x.id for x in newly_blocked}
         pending = [x for x in pending if x.id not in blocked_ids]
         if not pending:
@@ -1517,6 +1570,11 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
                         status="blocked",
                         error="waiting for every dependency PR to reach confirmed merged state",
                     )
+                    if state_store is not None:
+                        state_store.transition(
+                            item.id, "blocked", error=results[item.id].error,
+                            observation={"phase": "dependency_waiting", "item_id": item.id},
+                        )
                 pending = [x for x in pending if x.id not in waiting_ids]
                 continue
             raise CampaignError("Plan dependency cycle detected")
@@ -1532,6 +1590,13 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
         prior = dict(results)
         publication_barrier = _PublicationBarrier(wave) if item_executor is None else None
 
+        if state_store is not None:
+            for item in wave:
+                state_store.transition(
+                    item.id, "running",
+                    observation={"phase": "worker_started", "item_id": item.id},
+                )
+
         def execute(item):
             if item_executor is not None:
                 return item_executor(item, roles, prior)
@@ -1540,6 +1605,7 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
                 runner, env, trusted, prior, item,
                 publication_barrier=publication_barrier,
                 credential_registry=credential_registry,
+                state_store=state_store,
             )
 
         with ThreadPoolExecutor(max_workers=min(len(wave), 8)) as pool_executor:
@@ -1571,6 +1637,32 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
                             "actual changed-file collision in publication wave: "
                             + ", ".join(collision["matched_files"] or collision["items"])
                         )
+        if state_store is not None:
+            item_updates = {}
+            evidence_updates = {}
+            observation_updates = {}
+            for item in wave:
+                result = results[item.id]
+                status = result.status if result.status in campaign_state.ITEM_STATUSES else "failed"
+                item_updates[item.id] = {
+                    "status": status,
+                    "last_error": result.error,
+                    "branch": result.branch,
+                    "worktree": result.worktree,
+                    "pr_url": result.pr_url,
+                    "merged": result.merged,
+                    "changed_files": list(result.changed_files),
+                }
+                evidence_updates[item.id] = dict(result.criterion_evidence or {})
+                observation_updates[item.id] = {
+                    "phase": "worker_finished", "item_id": item.id,
+                    "status": result.status, "branch": result.branch,
+                    "changed_files": list(result.changed_files),
+                }
+            state_store.update(
+                {"item_states": item_updates, "latest_observation": observation_updates},
+                criterion_evidence=evidence_updates,
+            )
         ran = {x.id for x in wave}
         pending = [x for x in pending if x.id not in ran]
 

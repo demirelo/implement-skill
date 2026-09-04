@@ -131,6 +131,26 @@ Campaign
 
 Read `references/campaign.md` for scheduling, GitHub lifecycle, repair loops, and progress rules.
 
+## Canonical campaign state
+
+Campaign coordination owns a schema-validated `campaign-state.json` beside the continuity panel.
+It is separate from the append-only `events.jsonl` audit log.  The canonical state records the
+immutable campaign/Plan identity and base SHA, revisioned item state, criterion evidence, locked
+interfaces, decisions, blockers, observations, and amendments.  State writes use optimistic
+revision checks, deterministic validation, a file lock, and an atomic replace; stale or malformed
+patches are rejected without changing state.  After each wave, the manager atomically records the
+final criterion evidence and lifecycle/forge projection (`status`, branch/worktree, PR URL, merge
+confirmation, and changed files).
+
+Builder context is a fresh, bounded projection containing only the immutable Plan/spec, that
+item's current state and evidence, relevant locked interfaces/decisions/blockers, and its latest
+observation.  It contains no inherited transcript or event-log tail.  Item workers can patch only
+their own namespace; manager fields remain manager-owned.  Local deviations may be recorded
+automatically.  Interface/downstream amendments need evidence and a fresh Reviewer approval;
+goal/scope amendments stop with a user-authority-required blocker.  An accepted DAG amendment
+validates dependencies/cycles, invalidates affected evidence transitively, and returns those items
+to `pending` so they can be scheduled again.
+
 ## Per-item invariant
 
 Before starting an item:
