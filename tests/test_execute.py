@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
 from gate import detect_adapter, run_gate
-from execute import run_inner_loop, _copy_repo
+from execute import run_inner_loop, _copy_repo, _repo_context
 from oracle import AuthoredTest, check_red, protect_oracle
 from verification import VerificationContext
 
@@ -18,9 +18,11 @@ class _OracleAwareRunner:
 
     def __init__(self):
         self.calls = []
+        self.commands = []
 
     def __call__(self, argv, **kwargs):
         root = Path(kwargs["cwd"])
+        self.commands.append(argv)
         oracle = (root / "tests" / "test_ops.py").read_text()
         self.calls.append(oracle)
         green = "def multiply" in (root / "mathx" / "ops.py").read_text()
@@ -96,6 +98,18 @@ def test_inner_loop_reaches_green_in_one_turn():
     assert result.success is True
     assert result.turns == 1
     assert "def add(a, b)" in seen[0]  # the OW model is shown the repo source
+    assert "mathx/ops.py" in seen[0]
+
+
+def test_adapter_context_glob_includes_root_and_nested_sources(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='context'\nversion='0'\n")
+    (tmp_path / "root_source.py").write_text("ROOT_CONTEXT_MARKER\n")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "nested_source.py").write_text("NESTED_CONTEXT_MARKER\n")
+    adapter = detect_adapter(tmp_path)
+    context = _repo_context(tmp_path, context_globs=adapter["context_globs"])
+    assert "ROOT_CONTEXT_MARKER" in context
+    assert "NESTED_CONTEXT_MARKER" in context
 
 
 def test_python_oracle_red_then_inner_loop_green_without_hostile_execution():
@@ -138,7 +152,10 @@ def test_protected_oracle_rejects_assert_true_tamper_before_execution(tmp_path):
     )
     assert result.success is False
     assert "protected acceptance oracle" in result.ledger[0]
-    assert runner.calls == [snapshot.files["tests/test_ops.py"]]
+    assert len(runner.calls) == 3  # full test, lint, and type phases
+    assert runner.commands == [["pytest", "-q", "--tb=no", "-rf"],
+                               ["ruff", "check", "."], ["mypy", "."]]
+    assert all(content == snapshot.files["tests/test_ops.py"] for content in runner.calls)
     context.close()
 
 
@@ -175,7 +192,12 @@ def test_protected_oracle_is_restored_before_scoped_and_full_gates(tmp_path):
         verification_context=context, oracle_snapshot=snapshot,
     )
     assert result.success is True
-    assert len(runner.calls) == 3  # baseline, scoped target, and final full confirmation
+    assert len(runner.calls) == 7  # baseline full(3), scoped test(1), final full(3)
+    assert runner.commands == [
+        ["pytest", "-q", "--tb=no", "-rf"], ["ruff", "check", "."], ["mypy", "."],
+        ["pytest", "tests/test_ops.py::test_multiply", "-q", "--tb=no", "-rf"],
+        ["pytest", "-q", "--tb=no", "-rf"], ["ruff", "check", "."], ["mypy", "."],
+    ]
     assert len(set(runner.calls)) == 1
     context.close()
 

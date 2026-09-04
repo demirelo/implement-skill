@@ -1,5 +1,18 @@
 {
   "name": "python-pytest",
+  "schema_version": 1,
+  "support": "stable",
+  "runtime": {"name": "python", "version": "3.11"},
+  "toolchain": {"pytest": "9.1.1", "ruff": "0.15.22", "mypy": "2.3.0"},
+  "docker_image": null,
+  "context_globs": ["**/*.py", "pyproject.toml", "requirements*.txt"],
+  "package_manager": "pip",
+  "lockfile_policy": {"files": ["requirements-ci.txt"], "mode": "exact-versions"},
+  "dependency_preparation": {
+    "command": "python -m pip install -r requirements-ci.txt",
+    "network": "explicit-only",
+    "runs_in_gate": false
+  },
   "detect": ["pyproject.toml", "setup.py", "conftest.py"],
   "test_layout": "tests/test_*.py with `def test_*` functions; plain asserts",
   "oracle_globs": ["**/test_*.py"],

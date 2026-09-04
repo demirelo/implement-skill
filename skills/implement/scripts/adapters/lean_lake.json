@@ -1,5 +1,19 @@
 {
   "name": "lean-lake",
+  "schema_version": 1,
+  "support": "stable",
+  "runtime": {"name": "lean", "version_source": "lean-toolchain"},
+  "toolchain": {"source": "lean-toolchain", "requires_exact": true},
+  "docker_image": null,
+  "context_globs": ["**/*.lean", "lakefile.toml", "lakefile.lean", "lean-toolchain", "lake-manifest.json"],
+  "package_manager": "lake",
+  "lockfile_policy": {"files": ["lake-manifest.json"], "mode": "required-when-dependencies-exist"},
+  "dependency_preparation": {
+    "command": "lake update",
+    "network": "explicit-only",
+    "runs_in_gate": false,
+    "note": "Hydrate the committed manifest outside the sandbox before verification."
+  },
   "detect": ["lean-toolchain", "lakefile.toml", "lakefile.lean", "lake-manifest.json"],
   "required_any": ["lakefile.toml", "lakefile.lean"],
   "test_layout": "Lean acceptance modules under Tests/**/*.lean, Test/**/*.lean, or files named *Test.lean/*Tests.lean",
@@ -14,6 +28,5 @@
   "malformed_pattern": "(?i)(unexpected token|unexpected end of input|unterminated|invalid syntax)",
   "infrastructure_pattern": "(?i)(command not found|unknown executable|toolchain .+ is not installed|missing manifest|failed to load lake configuration)",
   "timeout": 1200,
-  "lint_cmd": "lake build",
-  "type_cmd": "lake build"
+  "custom_phases": []
 }

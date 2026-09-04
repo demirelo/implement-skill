@@ -49,6 +49,13 @@ runs its configured N Builder candidates concurrently.
   dependencies must already be installed and hydrated because sandboxed gates have no network
   access. See [`references/lean.md`](skills/implement/references/lean.md).
 
+Every adapter declares its runtime/toolchain versions, source-context globs, package manager and
+lockfile policy, plus an explicit dependency-preparation step. Preparation is never implicit in a
+gate: `run_gate` rejects `npx`, unqualified `npm exec`, and dependency-install commands. Scoped
+iterations run only the test phase; full and publication gates run every declared test, lint, type,
+acceptance, and custom phase and retain per-phase failure evidence. CI exercises the TypeScript and
+Lean adapters with the minimal fixtures in `tests/fixtures/`.
+
 ## Model roles
 
 | Role | Selection | Responsibility |

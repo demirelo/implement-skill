@@ -419,7 +419,9 @@ def _verify_local(worktree, verification_context=None, oracle_snapshot=None):
         raise CampaignError("VerificationContext does not belong to local gate adapter")
     if oracle_snapshot is not None:
         oracle_snapshot.restore()
-    result = verification_context.run_gate()
+    # Final/publication confirmation uses the full-only API; scoped Builder iterations cannot be
+    # accidentally promoted to the PR boundary because this method has no ``only`` parameter.
+    result = verification_context.run_full_gate()
     if not result.passed or result.verified_count <= 0:
         raise CampaignError(f"local verification failed: {result.summary}")
     return adapter, result

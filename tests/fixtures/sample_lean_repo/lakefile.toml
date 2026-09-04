@@ -1,0 +1,6 @@
+name = "SampleLeanConformance"
+version = "0.1.0"
+defaultTargets = ["SampleLeanConformance"]
+
+[[lean_lib]]
+name = "SampleLeanConformance"

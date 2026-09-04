@@ -122,11 +122,17 @@ def test_re_gate_uses_adapter_verified_count_not_pytest_text(monkeypatch, tmp_pa
     monkeypatch.setattr(review, "apply_patch", lambda *_a, **_k: type("A", (), {"ok": True})())
     adapter = {"name": "lean-lake"}
     with _context(tmp_path, adapter) as context:
-        context.run_gate = lambda: GateResult(
-            passed=True, stdout="Build completed successfully\n", verified_count=2
-        )
+        seen = []
+
+        def full_gate(*, adapter=None, only=None, repo_root=None):
+            seen.append(only)
+            return GateResult(
+                passed=True, stdout="Build completed successfully\n", verified_count=2
+            )
+
+        context.run_gate = full_gate
         rg = review.re_gate(tmp_path, "diff", adapter, context)
-        assert rg.passed is True and rg.executed == 2
+        assert rg.passed is True and rg.executed == 2 and seen == [None]
 
 
 def test_re_gate_rolls_back_non_green_winner():

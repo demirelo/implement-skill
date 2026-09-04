@@ -5,8 +5,32 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from guard import classify
+
 ADAPTERS_DIR = Path(__file__).parent / "adapters"
 _ORACLE_SKIP = {".git", ".lake", ".worktrees", ".venv", "venv", "node_modules"}
+
+
+@dataclass
+class PhaseResult:
+    """Evidence for one declared verification phase.
+
+    ``command`` is retained as argv rather than a shell string so reports can show exactly what
+    was guarded and executed.  ``returncode`` is ``None`` when the command was denied before
+    execution.
+    """
+
+    name: str
+    command: tuple[str, ...]
+    passed: bool
+    returncode: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    error: str = ""
+
+    @property
+    def evidence(self) -> str:
+        return (self.stdout or "") + (self.stderr or "") + (self.error or "")
 
 
 @dataclass
@@ -17,6 +41,12 @@ class GateResult:
     stdout: str = ""
     passing_count: int = 0   # # tests that passed (lets the loop compute a turn-over-turn green delta)
     verified_count: int = 0  # # objective checks executed (generic H5 non-vacuity signal)
+    phase_results: dict[str, PhaseResult] = field(default_factory=dict)
+
+    @property
+    def phases(self) -> dict[str, PhaseResult]:
+        """Short alias used by renderers and callers that call phases ``phases``."""
+        return self.phase_results
 
 
 def _marker_present(repo: Path, marker: str) -> bool:
@@ -78,8 +108,12 @@ def _scoped_argv(adapter, node_ids) -> list | None:
         return None
     if len(ids) > 1 and not adapter.get("test_one_batch", True):
         return None
+    try:
+        template = shlex.split(str(adapter["test_one"]))
+    except (TypeError, ValueError):
+        return None
     argv = []
-    for tok in shlex.split(adapter["test_one"]):
+    for tok in template:
         if tok == "{path}":
             argv.extend(ids)
         else:
@@ -107,36 +141,174 @@ def _counts(repo_path, adapter, out: str, succeeded: bool,
 def _failing_tests(out: str, adapter) -> list[str]:
     if pattern := adapter.get("failure_pattern"):
         return list(dict.fromkeys(m.group(1).strip() for m in re.finditer(pattern, out)))
-    return [
+    return list(dict.fromkeys(
         line.split(" ", 1)[1].split(" - ")[0].strip()
         for line in out.splitlines()
         if line.startswith("FAILED ") or line.startswith("ERROR ")
-    ]
+    ))
+
+
+def _custom_commands(adapter) -> list[tuple[str, list[str]]]:
+    """Normalize the optional custom phase declaration.
+
+    ``custom_phases`` is the canonical form.  ``custom_cmds`` and ``custom`` are accepted as
+    small compatibility shims for hand-authored adapters; each may be a mapping of phase name to
+    command, a list of ``{"name", "cmd"}`` records, or a list of command strings.
+    """
+    raw = adapter.get("custom_phases")
+    if raw is None:
+        raw = adapter.get("custom_cmds")
+    if raw is None:
+        raw = adapter.get("custom_cmd")
+    if raw is None:
+        raw = adapter.get("custom")
+    if raw is None and isinstance(adapter.get("phases"), dict):
+        raw = {
+            name: command for name, command in adapter["phases"].items()
+            if name not in {"test", "lint", "type"}
+        }
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if isinstance(raw, dict):
+        raw = list(raw.items())
+    result = []
+    for index, item in enumerate(raw):
+        name, command = f"custom-{index + 1}", item
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("phase") or name)
+            command = item.get("cmd", item.get("command", ""))
+        elif isinstance(item, (tuple, list)) and len(item) == 2:
+            name, command = str(item[0]), item[1]
+        if not command:
+            continue
+        try:
+            argv = shlex.split(str(command))
+        except ValueError as exc:
+            # Keep malformed declarations visible to the guarded executor instead of dropping
+            # them; an empty argv is rejected fail-closed with phase-specific evidence.
+            argv = []
+            name = f"{name} (invalid command: {exc})"
+        result.append((name, argv))
+    return result
+
+
+def _split_command(command) -> list[str]:
+    """Parse a declarative command without ever turning malformed text into execution."""
+    try:
+        return shlex.split(str(command))
+    except (TypeError, ValueError):
+        return []
+
+
+def _network_install_reason(argv: list[str]) -> str:
+    """Reject dependency mutation from verification phases.
+
+    Preparation is an explicit, caller-owned step described by the adapter.  In particular,
+    ``npx`` otherwise downloads a missing binary and ``npm exec`` may do the same unless its
+    no-install flag is present.  A phase is never allowed to turn a missing dependency into a
+    network side effect.
+    """
+    head = Path(argv[0]).name if argv else ""
+    rest = argv[1:]
+    if head == "npx" and "--no-install" not in rest:
+        return "npx may install from the network; use an explicit preparation step and --no-install"
+    if head == "npm":
+        if "install" in rest or "ci" in rest or "update" in rest:
+            return "npm dependency installation is preparation, not a gate phase"
+        if "exec" in rest and not ({"--no", "--no-install"} & set(rest)):
+            return "npm exec may install from the network; add --no"
+    if head in {"pip", "pip3", "uv"} and "install" in rest:
+        return "dependency installation is preparation, not a gate phase"
+    if head.startswith("python") and rest[:2] == ["-m", "pip"] and "install" in rest[2:]:
+        return "dependency installation is preparation, not a gate phase"
+    if head in {"pnpm", "yarn", "bun"} and any(token in {"install", "add", "update"}
+                                                  for token in rest):
+        return "dependency installation is preparation, not a gate phase"
+    if head == "lake":
+        # `guard.classify` currently rejects these verb forms before this helper runs.  Keep an
+        # independent deny here as defense in depth: a future guard expansion must not turn a
+        # gate phase into a dependency fetch or repository mutation.  The cache form is Lake's
+        # explicit binary-cache fetch; the remaining verbs mutate the manifest/project tree.
+        lake_mutations = {"update", "install", "remove", "uninstall", "fetch", "download",
+                          "init", "new", "clean"}
+        if any(token in lake_mutations for token in rest):
+            return "lake dependency fetching or project mutation is preparation, not a gate phase"
+        if (len(rest) >= 3 and rest[:2] == ["exe", "cache"]
+                and any(token in {"get", "put", "push", "clean"} for token in rest[2:])):
+            return "lake cache fetching or mutation is preparation, not a gate phase"
+    return ""
+
+
+def _phase_commands(repo: Path, adapter, only) -> list[tuple[str, list[str]]]:
+    """Expand one gate invocation into named argv phases.
+
+    ``only`` is deliberately a scoped iteration mode: it emits only the test phase, even when
+    the adapter has lint/type/custom declarations.  A full invocation emits every declared phase
+    in stable order.  This keeps fast Builder turns cheap while making all final/publication calls
+    non-optional at the adapter boundary.
+    """
+    scoped = _scoped_argv(adapter, only)
+    if only is not None:
+        return [("test", scoped or _split_command(adapter["test_cmd"]))]
+
+    commands: list[tuple[str, list[str]]] = [("test", _split_command(adapter["test_cmd"]))]
+    # A Lake project does not automatically build arbitrary Tests/*.lean files. A full Lean gate
+    # therefore builds configured targets first, then elaborates every adapter-declared oracle.
+    if adapter.get("full_oracle_check"):
+        for path in oracle_paths(repo, adapter):
+            template = adapter.get("test_one")
+            if not template:
+                continue
+            oracle_argv = _scoped_argv(adapter, [str(path.relative_to(repo))])
+            if oracle_argv is not None:
+                commands.append((f"oracle:{path.relative_to(repo).as_posix()}", oracle_argv))
+    for name, key in (("lint", "lint_cmd"), ("type", "type_cmd")):
+        if adapter.get(key):
+            commands.append((name, _split_command(adapter[key])))
+    commands.extend(_custom_commands(adapter))
+    # A duplicate custom name must never silently replace an earlier phase's evidence in the
+    # result mapping. Preserve the authored name for the first occurrence and suffix later ones.
+    used: set[str] = set()
+    unique: list[tuple[str, list[str]]] = []
+    for name, command in commands:
+        base, candidate, index = name, name, 2
+        while candidate in used:
+            candidate, index = f"{base}#{index}", index + 1
+        used.add(candidate)
+        unique.append((candidate, command))
+    return unique
 
 
 def run_gate(repo_path, adapter, wrap=None, only=None, *, env=None,
               runner=None) -> GateResult:
     runner = subprocess.run if runner is None else runner
     timeout = adapter.get("timeout", 600)  # seconds; a hung suite must not stall the loop
-    # `only` runs just those failing tests (two-tier gate's scoped pass); full suite otherwise.
     repo = Path(repo_path)
-    scoped = _scoped_argv(adapter, only)
-    commands: list[list[str]] = [scoped or shlex.split(adapter["test_cmd"])]
-    # A Lake project does not automatically build arbitrary Tests/*.lean files. A full Lean gate
-    # therefore builds the configured targets first, then elaborates every adapter-declared oracle.
-    if scoped is None and adapter.get("full_oracle_check"):
-        template = adapter.get("test_one")
-        if template:
-            for path in oracle_paths(repo, adapter):
-                oracle_argv = _scoped_argv(adapter, [str(path.relative_to(repo))])
-                if oracle_argv is not None:
-                    commands.append(oracle_argv)
-
+    commands = _phase_commands(repo, adapter, only)
     outputs: list[str] = []
-    returncode = 0
-    completed_oracles = 0
-    for index, command in enumerate(commands):
-        if command is None:
+    phases: dict[str, PhaseResult] = {}
+    for name, command in commands:
+        if not command:
+            phase = PhaseResult(name=name, command=tuple(command), passed=False,
+                                error="empty phase command")
+            phases[name] = phase
+            outputs.append(f"[{name}] empty phase command\n")
+            continue
+        verdict = classify(command)
+        if not verdict.safe:
+            phase = PhaseResult(name=name, command=tuple(command), passed=False,
+                                error=f"guard denied: {verdict.reason}")
+            phases[name] = phase
+            outputs.append(f"[{name}] {phase.error}\n")
+            continue
+        network_reason = _network_install_reason(command)
+        if network_reason:
+            phase = PhaseResult(name=name, command=tuple(command), passed=False,
+                                error=f"network install denied: {network_reason}")
+            phases[name] = phase
+            outputs.append(f"[{name}] {phase.error}\n")
             continue
         argv = wrap(command, str(repo_path)) if wrap else command
         try:
@@ -156,22 +328,38 @@ def run_gate(repo_path, adapter, wrap=None, only=None, *, env=None,
                 s.decode(errors="replace") if isinstance(s, bytes) else (s or "")
                 for s in (exc.output, exc.stderr)
             )
-            return GateResult(passed=False, summary=f"timeout after {timeout}s",
-                              stdout="".join(outputs) + partial)
-        outputs.append((proc.stdout or "") + (proc.stderr or ""))
-        if proc.returncode != 0:
-            returncode = proc.returncode
-            break
-        if adapter.get("full_oracle_check") and (scoped is not None or index > 0):
-            completed_oracles += 1
+            phases[name] = PhaseResult(name=name, command=tuple(command), passed=False,
+                                       returncode=None, stdout=partial,
+                                       error=f"timeout after {timeout}s")
+            outputs.append(f"[{name}] timeout after {timeout}s\n{partial}")
+            continue
+        stdout = str(getattr(proc, "stdout", "") or "")
+        stderr = str(getattr(proc, "stderr", "") or "")
+        returncode = getattr(proc, "returncode", 1)
+        phases[name] = PhaseResult(name=name, command=tuple(command), passed=returncode == 0,
+                                   returncode=returncode, stdout=stdout, stderr=stderr)
+        outputs.append(stdout + stderr)
 
     out = "".join(outputs)
-    verified_override = completed_oracles if adapter.get("full_oracle_check") else None
-    pc, vc = _counts(repo_path, adapter, out, returncode == 0, verified_override)
-    if returncode == 0:
+    test_phase = phases.get("test")
+    test_succeeded = bool(test_phase and test_phase.passed)
+    oracle_phases = [phase for name, phase in phases.items() if name.startswith("oracle:")]
+    verified_override = (sum(phase.passed for phase in oracle_phases)
+                         if adapter.get("full_oracle_check") else None)
+    pc, vc = _counts(repo_path, adapter, out, test_succeeded, verified_override)
+    failed = [name for name, phase in phases.items() if not phase.passed]
+    if not failed:
         return GateResult(passed=True, summary="all checks pass", stdout=out,
-                          passing_count=pc, verified_count=vc)
+                          passing_count=pc, verified_count=vc, phase_results=phases)
     failing = _failing_tests(out, adapter)
+    # Lint/type/custom tools often produce no pytest-style FAILED line. Preserve a stable target
+    # for the loop while retaining the richer command/output evidence in ``phase_results``.
+    if not failing:
+        failing = failed.copy()
+    summary = "; ".join(
+        f"{name} phase failed" + (f" ({phases[name].error})" if phases[name].error else "")
+        for name in failed
+    )
     return GateResult(passed=False, failing_tests=failing,
-                      summary=f"{len(failing)} failing checks", stdout=out,
-                      passing_count=pc, verified_count=vc)
+                      summary=summary, stdout=out,
+                      passing_count=pc, verified_count=vc, phase_results=phases)
