@@ -14,6 +14,7 @@ from .execute import decision_trace
 from . import implement as implement_module
 from .implement import run_implement
 from .preflight import readiness
+from .runtime_env import prepend_interpreter_path
 from .profile import load_profile
 from .seed import default_profile
 from .setup import detect_env_credentials, profile_for_credentials
@@ -45,8 +46,8 @@ def _fake_model_output(argv, diff):
     return diff
 
 
-def _run(argv, cwd):
-    return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=60)
+def _run(argv, cwd, *, env=None):
+    return subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
 
 
 def create_repo(root: Path) -> Path:
@@ -135,21 +136,25 @@ def main():
     with tempfile.TemporaryDirectory(prefix="implement-smoke-") as tmp:
         root = Path(tmp)
         repo = create_repo(root)
+        environment = prepend_interpreter_path()
         profile, runner = smoke_profile(args.live)
         if not args.sandbox:
             implement_module.available_backends = lambda runner=None: ["none"]
         rows = readiness(profile, runner=runner)
-        before = _run(["pytest", "-q", "--tb=no", "-rf"], repo)
+        before = _run(["python3", "-m", "pytest", "-q", "--tb=no", "-rf"], repo,
+                      env=environment)
         best = run_implement(
             str(repo),
             TASK,
             profile=profile,
             runner=runner,
+            env=environment,
             max_turns=args.max_turns,
             trusted=True,
             ledger_path=str(root / "outcomes.jsonl"),
         )
-        after = _run(["pytest", "-q", "--tb=no", "-rf"], repo)
+        after = _run(["python3", "-m", "pytest", "-q", "--tb=no", "-rf"], repo,
+                     env=environment)
         print(
             json.dumps(
                 {

@@ -304,6 +304,7 @@ def test_default_item_executor_closes_context_when_builder_fails(monkeypatch, tm
     class SpyContext:
         def __init__(self, repo_root, *_args, **_kwargs):
             self.repo_root = Path(repo_root).resolve()
+            self.available_backends = _kwargs.get("available_backends")
             self.closed = False
             seen["context"] = self
 
@@ -330,9 +331,11 @@ def test_default_item_executor_closes_context_when_builder_fails(monkeypatch, tm
         True,
         {},
         PlanItem("x", "X", "scope", acceptance=("works",)),
+        verification_backends=["none"],
     )
     assert result.status == "failed"
     assert seen["context"].closed is True
+    assert seen["context"].available_backends == ["none"]
 
 
 def test_plan_item_threads_required_artifacts_into_builder_brief():
@@ -451,7 +454,13 @@ def test_command_oracle_is_checked_on_base_before_builder_dispatch(
     monkeypatch.setattr(campaign, "inspect_overlaps", lambda *a, **k: [])
     monkeypatch.setattr(campaign, "create_branch_worktree", lambda *a, **k: str(work))
     monkeypatch.setattr(campaign, "detect_adapter", lambda *_a, **_k: adapter)
-    monkeypatch.setattr(campaign, "available_backends", lambda runner=None: ["none"])
+    discovery_calls = []
+
+    def discover_backends(runner=None):
+        discovery_calls.append(runner)
+        return ["none"]
+
+    monkeypatch.setattr(campaign, "available_backends", discover_backends)
     monkeypatch.setattr(campaign, "run_implement", fake_builder)
     item = PlanItem.from_mapping({
         "id": "item", "title": "Item",
@@ -467,6 +476,7 @@ def test_command_oracle_is_checked_on_base_before_builder_dispatch(
     assert result.status == "failed" and error_fragment in result.error
     assert command_calls == [["pytest", "tests/test_command.py", "-q"]]
     assert builder_called is builder_expected
+    assert discovery_calls == [None]
 
 
 def test_campaign_rejects_legacy_criterion_before_green_autonomy():
