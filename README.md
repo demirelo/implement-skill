@@ -21,27 +21,19 @@ It ships for two hosts: a [Claude Code plugin](#claude-code) and a native
 `skills/implement/` tree contains host metadata and one-window compatibility shims; the canonical
 engine is under `implement_skill/`.
 
-> **Status: feature-complete (v1.1.0).** The offline tests, Ruff, and mypy gates are the release
-> evidence for this version.
+> **Status: validation scope (v1.1.0).** The repository documents and tests the local offline
+> lifecycle, package boundaries, and configured host contracts. A real campaign still needs its
+> selected model, forge, and sandbox access; those external integrations are not claimed here.
 
 ## First five minutes: install, then see a real local campaign
 
-This path is deliberately credential-free. Install the package and its pinned development tools
-once; after installation, `implement-skill demo` runs offline without credentials or network access
-and makes no GitHub mutations.
+This path is deliberately credential-free. Create one virtual environment, install the package and
+its pinned development tools once, and then run the offline demo without credentials, network, or
+GitHub mutation.
 
 ```bash
 git clone https://github.com/demirelo/implement-skill.git
 cd implement-skill
-python3 -m pip install -e '.[dev]'
-implement-skill demo
-```
-
-The editable install puts the command and package in the same Python environment and installs the
-declared development pins (`pytest`, Ruff, mypy, and the wheel builder). Use a virtual environment
-if you do not want to change the system Python:
-
-```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[dev]'
@@ -49,19 +41,19 @@ implement-skill demo
 ```
 
 The demo creates a tiny RED calculator repository, runs the production campaign executor, and
-drives a local lifecycle through a draft PR, review, objective gate, confirmed merge, and worktree
-cleanup. Its Python acceptance test is real: the first gate fails, the Builder patch changes
-`a - b` to `a + b`, and the final gate passes. Git, the linked worktree, and the final local merge
-are real; only the model and forge boundaries are deterministic doubles.
+drives a local lifecycle through a simulated forge draft PR, review, objective gate, simulated
+confirmed merge, and worktree cleanup. Its Python acceptance test is real: the first gate fails,
+the Builder patch changes `a - b` to `a + b`, and the final gate passes. Git, the linked worktree,
+and the final local merge are real; only the model and forge boundaries are deterministic doubles.
 
 Typical human output is short and looks like this:
 
 ```text
 Implement Skill offline demo
   RED  calculator acceptance test failed as expected
-  RUN  draft PR -> fresh review -> objective gate -> confirmed merge
+  RUN  simulated forge draft PR -> fresh review -> objective gate -> simulated confirmed merge
   GREEN calculator acceptance test passed
-  Merged https://github.com/implement-skill/demo/pull/1
+  Simulated forge merge confirmed https://github.com/implement-skill/demo/pull/1
   Cleaned the temporary project and campaign state
 Next: implement-skill demo --keep ./implement-skill-demo
 ```
@@ -122,15 +114,12 @@ fails closed instead of being silently substituted.
 
 ## Codex
 
-The Codex route uses the same engine as the package. Clone the repository and install the native
-skill in the default Codex skills directory:
+The Codex route uses the same engine as the package. After the first-five-minutes checkout and
+while its `.venv` remains activated, install the native skill in the default Codex skills directory:
 
 ```bash
-git clone https://github.com/demirelo/implement-skill.git ~/implement-skill
 mkdir -p ~/.codex/skills
-ln -s ~/implement-skill/skills/implement ~/.codex/skills/implement
-cd ~/implement-skill
-python3 -m pip install -e '.[dev]'
+ln -s "$PWD/skills/implement" ~/.codex/skills/implement
 ```
 
 `ln -s` intentionally does not overwrite an existing target. If
@@ -158,19 +147,30 @@ This is the exact Luna/Muse configuration:
 | Reviewer | `muse` | fresh OpenRouter review, model `meta/muse-spark-1.3` |
 
 `strict: true` means no silent substitution: an unavailable or mismatched model fails the run.
-The native host bridge must return a structured envelope with the exact requested `model`, a
-terminal `finish_reason: "stop"`, and non-empty structured `content`. For the Luna Builder that
-identity is `gpt-5.6-luna`; the OpenRouter Reviewer response must identify
-`meta/muse-spark-1.3`. A wrong identity, missing content, non-terminal status such as `length`, or
-truncated response is a failed review, never approval. The Reviewer receives a fresh review
-context rather than the Builder's rationale.
+The maintained package bridge supplies the native `luna` Builder callback and validates a complete
+JSONL turn before returning the engine envelope. Its `model` field records the host-configured
+request; the native CLI may omit an upstream model identity, so this field is not an attestation
+from model-authored output. Explicit contradictory identity fields are rejected, as are missing or
+truncated responses. External provider dispatch uses the same identity and terminal-response checks
+before a diff reaches the loop.
 
-The `$implement` invocation above is the recommended Codex path. A low-level package integration
-must additionally supply the native `luna` Builder callback and the Reviewer callback; see the
-[schematic API example](#schematic-package-api) in the advanced reference below. The accepted Luna
-response shape is `{"model": "gpt-5.6-luna", "finish_reason": "stop", "content": "..."}`.
-External provider dispatch uses the same identity and terminal-response checks before a diff reaches
-the loop.
+For a runnable native pair, configure the project profile and invoke the maintained example:
+
+```bash
+python3 -m implement_skill.setup --builder luna --reviewer muse --project /path/to/repo
+python3 examples/native_luna_campaign.py /path/to/repo \
+  --plan examples/plan.json \
+  --state-home /path/to/state-home \
+  --codex codex \
+  --autonomy ready
+```
+
+The default `codex` executable is resolved through `PATH`. If that resolves to an incompatible
+wrapper, pass a platform-specific native executable path (for example, on this macOS host,
+`/Applications/ChatGPT.app/Contents/Resources/codex`).
+The same command is safe to rerun after interruption because the production campaign reconciles
+its durable state and external actions before retrying. Use `--autonomy auto-merge` only when the
+forge policy and repository controls authorize that transition.
 
 ### Configure model credentials only when you leave the demo
 
@@ -180,12 +180,14 @@ Run the setup wizard after deciding which real providers to use:
 python3 -m implement_skill.setup
 ```
 
-It writes only non-secret source declarations to `~/.config/implement/config.json`. Secret values
+It writes only non-secret source declarations to `~/.config/implement/config.json`. To configure a
+single repository without replacing the global profile, add
+`--project /path/to/repo`; this writes `/path/to/repo/.implement/config.json`. Secret values
 remain in an environment variable, a gitignored `.env`, the macOS Keychain, or a 1Password
 `op://<vault>/<item>/credential` reference. The simplest OpenRouter route is an
-`OPENROUTER_API_KEY` environment variable. Setup probes selected models and removes models that
-are not live; the per-run `strict: true` choice still prevents substitution for a reproducible
-campaign.
+`OPENROUTER_API_KEY` environment variable. Legacy setup composes the live subset; selected-role
+setup exits nonzero without saving when a requested role is not live. The per-run `strict: true`
+choice still prevents substitution for a reproducible campaign.
 
 See [`skills/implement/references/credentials.md`](skills/implement/references/credentials.md) for
 the complete source precedence and unattended 1Password guidance.
@@ -322,6 +324,8 @@ Start with the quickstart above. The detailed material remains available here:
 - [Visual overview](docs/overview.html) — a one-page map of the end-to-end loop.
 - [Campaign scheduling and lifecycle](skills/implement/references/campaign.md) — dependency waves,
   canonical state, review, CI repair, merge conflicts, and publication.
+- [Canonical state and continuity](skills/implement/references/state-and-continuity.md) — the
+  manager-owned state schema, bounded worker projection, amendments, and audit separation.
 - [Dispatch and model response contract](skills/implement/references/dispatch.md) — provider routes,
   exact identity, terminal completion, and fresh review expectations.
 - [Lean adapter reference](skills/implement/references/lean.md) — exact toolchain, hydration, and
@@ -332,17 +336,22 @@ Start with the quickstart above. The detailed material remains available here:
 - [Python API](implement_skill/__init__.py) and [campaign API](implement_skill/campaign.py) — public
   imports and the `run_campaign` implementation surface.
 
-### Schematic package API
+### Package API
 
-The host-native `$implement` path is easier to use. If an application embeds the package directly,
-the following is schematic rather than a copy-paste quickstart: `plan`, `luna_callback`, and
-`muse_callback` are host-provided values, and the application must provide a suitable profile.
-`luna_callback` must return the exact structured envelope shown above; `muse_callback` is likewise
-validated as a fresh Reviewer boundary. Keep `strict=True` to reject unavailable models rather than
-silently substituting them:
+The maintained native example is the recommended live integration. Applications embedding the
+package directly can reuse its `NativeCodexBridge` and provide their own fresh Reviewer callback;
+the engine validates both role boundaries. Keep `strict=True` to reject unavailable models rather
+than silently substituting them:
 
 ```python
-from implement_skill import run_campaign
+from implement_skill import NativeCodexBridge, run_campaign
+
+luna_callback = NativeCodexBridge(
+    executable="/path/to/codex",
+    model="gpt-5.6-luna",
+    reasoning_effort="xhigh",
+    cwd="/path/to/your/repo",
+)
 
 result = run_campaign(
     "/path/to/your/repo",

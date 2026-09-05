@@ -102,7 +102,7 @@ def test_release_manifest_and_host_manifests_agree():
     plugin = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
     marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
     assert f'version = "{release["version"]}"' in pyproject
-    assert f"feature-complete (v{release['version']})" in readme
+    assert f"validation scope (v{release['version']})" in readme
     assert "The `implement_skill/` engine is organized by responsibility" in readme
     assert plugin["version"] == release["version"]
     assert marketplace["plugins"][0]["version"] == release["version"]

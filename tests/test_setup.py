@@ -1,8 +1,13 @@
 import json
 import sys
 from pathlib import Path
+
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
+import setup as setup_impl
 from setup import (
+    _selected_panels,
     credential_source,
     detect_env_credentials,
     interactive_setup,
@@ -50,6 +55,60 @@ def test_interactive_setup_builds_profile_from_scripted_answers():
     assert "openrouter" in profile["credentials"]
     assert profile["credentials"]["openrouter"] == {"source": "env", "var": "OPENROUTER_API_KEY"}
     assert profile["panels"]["builders"]  # at least one builder composed
+
+
+def test_selected_roles_skip_unrelated_panel_prompt_and_probe_only_selection():
+    prompts = []
+    profile = interactive_setup(
+        input_fn=lambda prompt: prompts.append(prompt) or "",
+        getpass_fn=lambda _prompt: "",
+        runner=_AlwaysLiveRunner(),
+        env={"OPENROUTER_API_KEY": "test-key"},
+        selected_builders=["luna"],
+        selected_reviewer="muse",
+    )
+    assert profile["panels"] == {"architects": ["muse"], "builders": ["luna"]}
+    assert not any("Proposed panels" in prompt for prompt in prompts)
+
+
+def test_selected_panels_reject_unknown_models():
+    with pytest.raises(ValueError, match="unknown selected model"):
+        _selected_panels({"pool": {"luna": {}}}, builders=["missing"], reviewer="luna")
+
+
+def test_setup_cli_project_scope_does_not_replace_global_profile(tmp_path, monkeypatch):
+    saved = {}
+    monkeypatch.setattr(
+        setup_impl,
+        "interactive_setup",
+        lambda **_kwargs: {"panels": {"architects": ["muse"], "builders": ["luna"]}},
+    )
+
+    def save_profile(data, *, scope, start=None, **_kwargs):
+        saved.update(data=data, scope=scope, start=start)
+        return tmp_path / ".implement" / "config.json"
+
+    monkeypatch.setattr(setup_impl, "save_profile", save_profile)
+    setup_impl.main([
+        "--builder", "luna", "--reviewer", "muse", "--project", str(tmp_path),
+    ])
+    assert saved["scope"] == "project"
+    assert saved["start"] == tmp_path
+
+
+def test_selected_setup_returns_nonzero_and_does_not_save_dropped_roles(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        setup_impl,
+        "interactive_setup",
+        lambda **_kwargs: {"panels": {"architects": [], "builders": []}},
+    )
+    monkeypatch.setattr(setup_impl, "save_profile", lambda *_args, **_kwargs: pytest.fail("saved"))
+
+    result = setup_impl.main([
+        "--builder", "luna", "--reviewer", "muse", "--project", str(tmp_path),
+    ])
+    assert result == 2
+    assert "luna" in capsys.readouterr().err
 
 
 class _AlwaysLiveRunner:

@@ -3,7 +3,9 @@
 ## Architects (judgment: intent, plan, tests, review)
 - **claude** — the orchestrator itself / Task subagents; headless Opus dispatch uses `claude-opus-4-8 --effort max`.
 - **gpt** — `mcp__codex__codex`, **always** `model: "gpt-5.6-sol"` + `config: {"model_reasoning_effort": "xhigh"}`. No other model/effort on the Codex/ChatGPT path.
-- **luna** — native Codex host bridge, **always** `model: "gpt-5.6-luna"` + `config: {"model_reasoning_effort": "xhigh"}`.
+- **luna** — the maintained `implement_skill.NativeCodexBridge`, defaulting to the local Codex
+  executable, `model: "gpt-5.6-luna"`, and `model_reasoning_effort: "xhigh"`. Pass an explicit
+  executable path when PATH is not trusted.
 - **muse** — `team_dispatch.py --provider openrouter --model meta/muse-spark-1.3`; the installed
   OpenRouter Reviewer ID in the seed profile.
 - **glm** — `team_dispatch.py --provider glm --route direct --effort high` (Venice e2ee).
@@ -32,6 +34,8 @@ See `panel-continuity.md` for the exact prompt-packing and ledger rules.
 
 External API responses are accepted only when the returned model exactly matches the requested ID,
 the response has a structured message, non-empty content, and terminal `finish_reason: "stop"`.
-The native host bridge exposes the same envelope (`model`, terminal status, structured content) to
-its preflight callback; missing or truncated envelopes fail closed. Legacy plain callbacks remain
-an offline compatibility seam and are not externally identity-verified approvals.
+The native bridge exposes the same envelope (`model`, terminal status, structured content) to the
+host callback; missing, failed, or truncated JSONL events fail closed. Its `model` field records the
+host-configured request because the local CLI event stream may omit returned-model identity; it is
+not an upstream model attestation. Legacy plain callbacks remain an offline compatibility seam and
+are not externally identity-verified approvals.

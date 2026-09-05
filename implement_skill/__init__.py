@@ -17,6 +17,7 @@ from .campaign import (
 )
 from .implement import run_implement
 from .scheduler import ResourceBudget, ResourceLimitError, ResourceUsage, Scheduler
+from .native_codex import NativeCodexBridge, NativeCodexError
 
 __all__ = [
     "CampaignError",
@@ -32,4 +33,6 @@ __all__ = [
     "ResourceLimitError",
     "ResourceUsage",
     "Scheduler",
+    "NativeCodexBridge",
+    "NativeCodexError",
 ]

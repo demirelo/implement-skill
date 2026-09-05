@@ -52,25 +52,13 @@ overlap. Run that wave concurrently. After it settles, recompute readiness from 
 
 ### Canonical manager state
 
-In addition to the PR and append-only panel events, the manager maintains a durable
-`~/.config/implement/panels/<repo-slug>/campaign-state.json`.  This is the canonical, validated
-projection used for scheduling and lifecycle transitions.  Its schema contains `version`, campaign
-and immutable original Plan identity, `revision`, immutable `base_sha`, active `item_states`,
-criterion evidence, locked interfaces, decisions, blockers, latest observations, and amendments.
-It is written with an optimistic expected-revision check under a file lock and atomic replace.
-Malformed or stale patches fail closed and leave the prior file unchanged.
-After every execution wave, one manager-owned update records each result's final criterion
-evidence together with lifecycle and forge metadata (`status`, branch/worktree, PR URL, merge
-confirmation, and changed files), so no worker can publish an unverified projection.
-
-The append-only `events.jsonl` and git history remain audit/on-demand scouting material; they are
-not folded into normal worker context.  Each fresh item worker receives only a bounded projection:
-the immutable spec, its item state/evidence, relevant locked interfaces/decisions/blockers, and
-latest observation.  Builders can update only their own item namespace.  Local implementation
-deviations may be recorded automatically.  Interface/downstream changes require evidence and a
-fresh Reviewer approval; goal/scope changes produce a user-authority-required blocker and do not
-alter the Plan.  Accepted DAG amendments validate dependencies and cycles, clear affected
-criterion evidence transitively, reset affected items to `pending`, and make them schedulable.
+The complete state/continuity boundary is maintained in
+[state-and-continuity.md](state-and-continuity.md). In brief, the manager owns the validated,
+revisioned `campaign-state.json`; the append-only `events.jsonl` and git history are audit/on-demand
+scouting material. Every fresh item worker receives only its bounded immutable spec, item state and
+evidence, relevant locks/decisions/blockers, and latest observation. Workers cannot write lifecycle,
+evidence, forge, or Plan fields. Accepted amendments follow the authority and invalidation rules in
+that reference.
 
 Git operations that mutate the shared repository metadata—fetch, worktree creation, cleanup—must be
 serialized. Implementation, tests, model calls, review, and PR monitoring remain parallel inside

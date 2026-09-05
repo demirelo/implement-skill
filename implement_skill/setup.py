@@ -2,15 +2,17 @@
 so it is fully testable. Secrets are never echoed: raw keys go through getpass_fn and are written to
 the macOS keychain / .env; 1Password refs and env-var names are non-secret and entered via input_fn.
 Run as `python3 skill/scripts/setup.py`."""
+import argparse
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-from .resolvers import resolve
 from .panel import default_panels
 from .preflight import readiness
 from .profile import save_profile
+from .resolvers import resolve
 from .seed import default_profile
 
 _HERE = Path(__file__).parent
@@ -80,7 +82,29 @@ def profile_for_credentials(base: dict, creds: dict) -> dict:
     return profile
 
 
-def interactive_setup(input_fn=input, getpass_fn=None, runner=subprocess.run, env=None) -> dict:
+def _selected_panels(base: dict, builders=None, reviewer=None) -> dict:
+    """Build a panel containing only explicitly selected roles.
+
+    This is an additive setup path for reproducible campaigns.  The historical wizard still uses
+    ``default_panels`` when no roles are supplied.
+    """
+    pool = base.get("pool", {})
+    selected_builders = list(builders or ())
+    if not selected_builders:
+        raise ValueError("at least one selected Builder is required")
+    unknown = [model for model in selected_builders if model not in pool]
+    if reviewer is not None and reviewer not in pool:
+        unknown.append(reviewer)
+    if unknown:
+        raise ValueError(f"unknown selected model(s): {sorted(set(unknown))}")
+    return {
+        "architects": [reviewer] if reviewer else [],
+        "builders": list(dict.fromkeys(selected_builders)),
+    }
+
+
+def interactive_setup(input_fn=input, getpass_fn=None, runner=subprocess.run, env=None,
+                      selected_builders=None, selected_reviewer=None) -> dict:
     env = os.environ if env is None else env
     base = default_profile(_MODELS, _PROVIDERS)
     creds: dict = detect_env_credentials(env)
@@ -107,14 +131,18 @@ def interactive_setup(input_fn=input, getpass_fn=None, runner=subprocess.run, en
     pool = profile["pool"]
     available: set = set()
     for mid, entry in pool.items():
-        if entry.get("backend") in ("claude_headless", "codex_mcp"):
+        if (entry.get("backend") in ("claude_headless", "codex_mcp")
+                or entry.get("cred_provider") in creds or entry.get("provider") in creds):
             available.add(mid)
-        elif entry.get("cred_provider") in creds or entry.get("provider") in creds:
-            available.add(mid)
-    panels = default_panels(available)
-    accept = input_fn(f"Proposed panels {panels} — accept? [Y/n]: ").strip().lower()
-    if accept == "n":
-        print("  (edit ~/.config/implement/config.json to customize)")
+    explicit_roles = selected_builders is not None or selected_reviewer is not None
+    if explicit_roles:
+        panels = _selected_panels(base, selected_builders, selected_reviewer)
+        print(f"Selected panels {panels}")
+    else:
+        panels = default_panels(available)
+        accept = input_fn(f"Proposed panels {panels} — accept? [Y/n]: ").strip().lower()
+        if accept == "n":
+            print("  (edit ~/.config/implement/config.json to customize)")
     profile["panels"] = panels
     # 1-token liveness probe per panel member; drop the ones that fail so a present-but-dead
     # key surfaces at setup, not mid-loop (spec §4).
@@ -127,12 +155,47 @@ def interactive_setup(input_fn=input, getpass_fn=None, runner=subprocess.run, en
     return profile
 
 
-def main():  # pragma: no cover
+def main(argv=None):  # pragma: no cover
     import getpass
-    profile = interactive_setup(getpass_fn=getpass.getpass)
-    path = save_profile(profile, scope="global")
+    parser = argparse.ArgumentParser(description="Configure implement model credentials and roles")
+    parser.add_argument(
+        "--builder", dest="builders", action="append", metavar="MODEL",
+        help="configure and probe only this Builder role (repeat for a candidate pool)",
+    )
+    parser.add_argument(
+        "--reviewer", metavar="MODEL",
+        help="configure and probe only this Reviewer role with explicit Builders",
+    )
+    parser.add_argument(
+        "--project", type=Path, metavar="PATH",
+        help="save the profile in PATH/.implement/config.json instead of global config",
+    )
+    args = parser.parse_args(argv)
+    if (args.builders is None) != (args.reviewer is None):
+        parser.error("--builder and --reviewer must be supplied together")
+    if args.project is not None and not args.project.is_dir():
+        parser.error(f"project path is not a directory: {args.project}")
+    profile = interactive_setup(
+        getpass_fn=getpass.getpass,
+        selected_builders=args.builders,
+        selected_reviewer=args.reviewer,
+    )
+    if args.builders is not None:
+        requested = list(dict.fromkeys([*args.builders, args.reviewer]))
+        active = set(profile.get("panels", {}).get("architects", []))
+        active.update(profile.get("panels", {}).get("builders", []))
+        unavailable = [model for model in requested if model not in active]
+        if unavailable:
+            print(
+                "Selected role setup could not verify live models: "
+                f"{unavailable}. No profile was saved; check host readiness/credentials and retry.",
+                file=sys.stderr,
+            )
+            return 2
+    scope = "project" if args.project is not None else "global"
+    path = save_profile(profile, scope=scope, start=args.project)
     print(f"Saved profile to {path}")
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    raise SystemExit(main())

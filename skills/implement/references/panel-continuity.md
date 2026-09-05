@@ -53,11 +53,11 @@ After each useful response, update the ledger with:
 - Any provider-specific failure mode to avoid next time.
 
 Campaign item workers use the canonical manager projection rather than this historical panel
-slice.  Their context contains only the immutable item spec, their current item namespace,
-criterion evidence, locked interfaces, relevant decisions/blockers, and latest observation.  The
-projection is fresh for every item and never includes an inherited transcript, raw events, or git
-history.  This keeps continuity useful for human/on-demand scouting without allowing audit tails
-to become hidden Builder instructions.
+slice. Their complete authority and bounded-context contract is documented in
+[state-and-continuity.md](state-and-continuity.md): only the immutable item spec, current item
+namespace, relevant locked interfaces/decisions/blockers, and latest observation are projected.
+This keeps continuity useful for human/on-demand scouting without allowing audit tails to become
+hidden Builder instructions.
 
 ## Reviews Stay Fresh
 
@@ -76,9 +76,9 @@ State is **durable** per repo under `~/.config/implement/panels/<repo-slug>/` (b
 - `panel-brief.md` — objective, branch/PR map, acceptance criteria, accepted decisions.
 - `events.jsonl` — append-only source of truth (`decision`, `rejected`, `invariant`, `review`,
   `provider_note`, `delta`, `run`, `pr`).
-- `campaign-state.json` — manager-owned schema-validated campaign projection.  It is revisioned
-  and atomically written separately from `events.jsonl`; item workers may patch only their own
-  namespace.
+- `campaign-state.json` — manager-owned schema-validated campaign projection. Its schema, atomic
+  writes, revision checks, and worker authority are defined once in
+  [state-and-continuity.md](state-and-continuity.md), separately from `events.jsonl`.
 - `providers/<model>.md` — per-model ledgers; `pack()` reads ONLY the target model's ledger, so
   Kimi's security memory never leaks into DeepSeek's prompt.
 
