@@ -141,3 +141,27 @@ def test_cleanup_refuses_unconfirmed_merge(tmp_path):
         remove_merged_worktree(str(repo), wt, "implement/item-b")
     assert Path(wt).exists()
     remove_worktree(str(repo), wt)
+
+
+def test_confirmed_cleanup_reports_residual_worktree(tmp_path):
+    repo = _git_repo(tmp_path)
+    wt = create_branch_worktree(str(repo), "item-c", "implement/item-c", base="HEAD")
+
+    class FailedRemoval:
+        def __call__(self, argv, **kwargs):
+            if argv[3:6] == ["worktree", "remove", "--force"]:
+                class Proc:
+                    returncode = 1
+                    stdout = ""
+                    stderr = "worktree is busy"
+
+                return Proc()
+            return sp.run(argv, **kwargs)
+
+    with pytest.raises(WorkspaceError, match="left path in place"):
+        remove_merged_worktree(
+            str(repo), wt, "implement/item-c", runner=FailedRemoval(),
+            confirmation=MergeConfirmation(True, {}),
+        )
+    assert Path(wt).exists()
+    remove_worktree(str(repo), wt)

@@ -23,8 +23,9 @@ engine is under `implement_skill/`.
 
 > **Status: validation scope (v1.1.0).** The repository documents and tests the local offline
 > lifecycle, package boundaries, and configured host contracts. One bounded native Luna/Muse/GitHub
-> campaign is recorded in the [live validation recipe](docs/live-validation.md); its post-merge
-> cleanup still needs confirmation. This does not claim every external integration.
+> campaign is recorded in the [live validation recipe](docs/live-validation.md); its local
+> post-merge cleanup and restart idempotence are confirmed. This does not claim every external
+> integration.
 
 ## First five minutes: install, then see a real local campaign
 
