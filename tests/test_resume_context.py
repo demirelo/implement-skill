@@ -218,6 +218,60 @@ def test_reconcile_accepts_unknown_forge_merge_state_without_claiming_merge(tmp_
     assert store.read()["item_states"]["a"]["merge_state"] == "UNKNOWN"
 
 
+def test_reconcile_refreshes_missing_merge_objects_before_confirming_ancestry(tmp_path):
+    repo, home, store, state = _store(tmp_path)
+    row = {**_pr_row(state, draft=False), "state": "MERGED"}
+    calls = []
+
+    class RefreshingRunner:
+        def __call__(self, argv, **kwargs):
+            calls.append(argv)
+
+            class Proc:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            proc = Proc()
+            if argv[:3] == ["gh", "pr", "view"]:
+                proc.stdout = json.dumps({
+                    "state": "MERGED",
+                    "mergedAt": "2026-09-05T08:57:08Z",
+                    "mergeCommit": {"oid": "merge-sha"},
+                    "headRefOid": "head-sha",
+                    "baseRefName": "main",
+                    "mergeStateStatus": "UNKNOWN",
+                })
+            elif argv[:2] == ["git", "cat-file"]:
+                proc.returncode = 1
+            elif argv[:2] == ["git", "merge-base"]:
+                proc.returncode = 0
+            return proc
+
+    facts = reconcile_campaign(
+        repo,
+        state_store=store,
+        home=home,
+        inventory=_inventory(
+            prs=[row],
+            statuses={"7": {
+                "state": "MERGED",
+                "headRefOid": "head-sha",
+                "isDraft": False,
+                "mergeStateStatus": "UNKNOWN",
+            }},
+        ),
+        runner=RefreshingRunner(),
+        persist=True,
+    )
+
+    assert facts["items"]["a"]["phase"] == "merged"
+    assert facts["items"]["a"]["merged"] is True
+    fetches = [argv for argv in calls if argv[:2] == ["git", "fetch"]]
+    assert [argv[-1] for argv in fetches] == ["base-sha", "merge-sha"]
+    assert store.read()["item_states"]["a"]["phase"] == "merged"
+
+
 def test_reconcile_behind_pr_is_ready_for_refresh_not_terminal_queue(tmp_path):
     repo, home, store, state = _store(tmp_path)
     row = _pr_row(state, draft=False)

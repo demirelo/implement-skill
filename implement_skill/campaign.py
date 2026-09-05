@@ -1552,8 +1552,11 @@ def reconcile_campaign(repo, plan=None, *, state_store=None, home=None, runner=s
                         raise CampaignError(f"cannot read checks for PR #{pr_ref.number}: {exc}") from exc
             merge_state = str(status.get("state") or "").upper()
             if merge_state == "MERGED":
+                # Reconciliation may run before this checkout has fetched the forge's merge
+                # commit. Refresh only the exact immutable Plan base SHA and merge commit used for
+                # ancestry; the forge's baseRefName is a branch label, not equivalent evidence.
                 confirmed = confirm_merge(
-                    repo, pr_ref, intended_base=state["base_sha"], refresh=False, runner=runner,
+                    repo, pr_ref, intended_base=state["base_sha"], refresh=True, runner=runner,
                 )
             merge_state_status = str(status.get("mergeStateStatus") or "").upper()
             # BEHIND is a refresh requirement, not evidence that an auto-merge request crossed the
