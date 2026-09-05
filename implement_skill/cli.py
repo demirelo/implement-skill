@@ -69,14 +69,14 @@ def _human_summary(summary: dict) -> str:
             "  GREEN calculator acceptance test passed",
             f"  Merged {summary['campaign']['pr_url']}",
         ])
-        if summary["cleanup"] == "kept":
+        if summary["cleanup"] in {"kept", "retained"}:
             lines.append(f"  Kept {summary['kept_path']}")
         else:
             lines.append("  Cleaned the temporary project and campaign state")
         lines.append(f"Next: {summary['next_command']}")
     else:
         lines.append(f"  Failed at {summary['stage']}: {summary['error']}")
-        if summary["cleanup"] == "kept":
+        if summary["cleanup"] in {"kept", "retained"}:
             lines.append(f"  Kept {summary['kept_path']} for inspection")
         elif summary["cleanup"] == "cleaned":
             lines.append("  Cleaned the temporary project and campaign state")

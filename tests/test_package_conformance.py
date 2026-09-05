@@ -42,6 +42,35 @@ def test_plan_examples_and_activation_evals_are_checked():
     assert {row["category"] for row in rows if row["activate"]} == {"direct", "indirect"}
 
 
+def test_plan_validator_accepts_legacy_singular_oracle_path_as_canonical_plural():
+    legacy = {
+        "goal": "legacy oracle spelling",
+        "items": [{
+            "id": "one", "title": "One", "brief": "one",
+            "acceptance": [{"id": "C1", "statement": "works",
+                            "oracle_path": "tests/test_one.py"}],
+        }],
+    }
+    canonical = validate_plan(legacy)
+    assert canonical["items"][0]["acceptance"][0]["oracle_paths"] == ["tests/test_one.py"]
+    assert "oracle_path" not in canonical["items"][0]["acceptance"][0]
+
+
+@pytest.mark.parametrize("command", [7, ["pytest", "tests/test_one.py"]])
+def test_plan_validator_rejects_malformed_oracle_command(command):
+    plan = {
+        "goal": "bad command",
+        "items": [{
+            "id": "one", "title": "One", "brief": "one",
+            "acceptance": [{"id": "C1", "statement": "works",
+                            "oracle_paths": ["tests/test_one.py"],
+                            "oracle_command": command}],
+        }],
+    }
+    with pytest.raises(ValueError, match="oracle_command"):
+        validate_plan(plan)
+
+
 def test_documented_package_smoke_command_is_green():
     proc = subprocess.run(
         [sys.executable, "-m", "implement_skill.smoke"],

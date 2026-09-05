@@ -199,6 +199,18 @@ def test_demo_default_cleans_project_and_state():
     assert not Path(result.state_path).exists()
 
 
+def test_demo_reports_cleanup_failure_and_retains_ephemeral_path(monkeypatch):
+    monkeypatch.setattr(demo.shutil, "rmtree", lambda *_args, **_kwargs: None)
+
+    result = demo.run_demo()
+
+    assert result.ok is False
+    assert result.cleanup == "retained"
+    assert result.kept_path == result.project_path.removesuffix("/project")
+    assert Path(result.kept_path).exists()
+    assert "cleanup" in result.error.lower()
+
+
 def test_keep_requires_an_empty_explicit_target(tmp_path):
     target = tmp_path / "already-used"
     target.mkdir()

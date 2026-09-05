@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
@@ -31,8 +33,39 @@ def test_team_dispatch_backend_builds_provider_call_and_extracts_diff():
     out = fn("do it")
     assert out == "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
     argv, stdin = fake.calls[0]
-    assert "team_dispatch.py" in argv[1] and "--provider" in argv and "deepseek" in argv
+    assert argv[:3] == [sys.executable, "-m", "implement_skill.team_dispatch"]
+    assert "--provider" in argv and "deepseek" in argv
     assert stdin == "do it"
+
+
+def test_team_dispatch_uses_owning_interpreter_and_module_entrypoint():
+    fake = FakeRun()
+    make_dispatcher({"backend": "team_dispatch", "provider": "deepseek"}, runner=fake)("do it")
+    argv, _ = fake.calls[0]
+    assert argv[:3] == [sys.executable, "-m", "implement_skill.team_dispatch"]
+
+
+def test_team_dispatch_module_entrypoint_runs_outside_checkout(tmp_path):
+    package_root = Path(__file__).resolve().parents[1]
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": str(package_root),
+        "HOME": str(tmp_path),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+    }
+    completed = subprocess.run(
+        [sys.executable, "-m", "implement_skill.team_dispatch", "--provider", "deepseek"],
+        cwd=tmp_path,
+        env=environment,
+        input="probe\n",
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert completed.returncode != 0
+    assert "no credential" in completed.stderr
+    assert "ImportError" not in completed.stderr
+    assert "attempted relative import" not in completed.stderr
 
 
 def test_claude_headless_backend_builds_model_call():
@@ -78,8 +111,16 @@ def test_make_dispatcher_threads_route():
 def test_probe_argv_team_dispatch_is_one_token():
     from backends import probe_argv
     argv = probe_argv({"backend": "team_dispatch", "provider": "deepseek", "route": "openrouter"})
-    assert "team_dispatch.py" in argv[1] and "--provider" in argv and "deepseek" in argv
+    assert argv[:3] == [sys.executable, "-m", "implement_skill.team_dispatch"]
+    assert "--provider" in argv and "deepseek" in argv
     assert argv[argv.index("--max-tokens") + 1] == "32"
+
+
+def test_probe_argv_preserves_requested_team_dispatch_model():
+    from backends import probe_argv
+    argv = probe_argv({"backend": "team_dispatch", "provider": "grok",
+                       "route": "openrouter", "model": "x-ai/grok-4"})
+    assert argv[argv.index("--model") + 1] == "x-ai/grok-4"
 
 
 def test_probe_argv_claude_headless():

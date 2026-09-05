@@ -675,20 +675,38 @@ def run_demo(
             raise DemoError("canonical campaign state lacks confirmed merged evidence", stage="campaign")
         result.ok = True
         result.stage = "complete"
-        result.cleanup = "kept" if kept else "cleaned"
         return result
     except DemoError as exc:
         result.stage = exc.stage
         result.error = scrub(str(exc), env_secrets(environment))
-        result.cleanup = "kept" if kept else "cleaned"
         return result
     except Exception as exc:
         result.stage = "campaign" if project is not None and project.exists() else "setup"
         detail = str(exc)[:240] or type(exc).__name__
         result.error = scrub(detail, env_secrets(environment))
-        result.cleanup = "kept" if kept else "cleaned"
         return result
     finally:
         tempfile.tempdir = previous_tempdir
         if root is not None and not kept:
-            shutil.rmtree(root, ignore_errors=True)
+            cleanup_error = None
+            try:
+                shutil.rmtree(root)
+            except OSError as exc:
+                cleanup_error = str(exc)[:200] or type(exc).__name__
+            if root.exists():
+                result.ok = False
+                result.kept_path = str(root)
+                detail = cleanup_error or "temporary path still exists after cleanup"
+                message = (result.error + "; " if result.error else "") + f"cleanup failed: {detail}"
+                result.error = scrub(message, env_secrets(environment))
+                result.cleanup = "retained"
+            else:
+                result.cleanup = "cleaned"
+                if cleanup_error:
+                    result.ok = False
+                    message = (result.error + "; " if result.error else "") + (
+                        f"cleanup failed after removal: {cleanup_error}"
+                    )
+                    result.error = scrub(message, env_secrets(environment))
+        elif kept:
+            result.cleanup = "kept"

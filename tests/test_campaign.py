@@ -628,6 +628,92 @@ def test_run_campaign_accepts_single_model_config_mapping():
     assert seen["roles"].best_of_n == 3
 
 
+def test_run_campaign_rejects_unknown_model_config_keys():
+    plan = {"items": [{
+        "id": "a", "title": "A", "brief": "a",
+        "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}],
+    }]}
+    with pytest.raises(ValueError, match="unknown model config key"):
+        run_campaign("/repo", plan, models={
+            "builders": ["a"], "reviewer": "reviewer", "mystery": False,
+        }, profile=_profile(), item_executor=lambda *_args: ItemResult("a", "ready"))
+
+
+@pytest.mark.parametrize("models, match", [
+    ({"builders": "a", "reviewer": "reviewer"}, "builders"),
+    ({"builders": ["a"], "reviewer": 7}, "reviewer"),
+    ({"builders": ["a"], "reviewer": "reviewer", "best_of_n": True}, "best_of_n"),
+])
+def test_run_campaign_rejects_malformed_model_config(models, match):
+    plan = {"items": [{
+        "id": "a", "title": "A", "brief": "a",
+        "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}],
+    }]}
+    with pytest.raises((TypeError, ValueError), match=match):
+        run_campaign("/repo", plan, models=models, profile=_profile(),
+                     item_executor=lambda *_args: ItemResult("a", "ready"))
+
+
+def test_run_campaign_rejects_conflicting_separate_model_keywords():
+    plan = {"items": [{
+        "id": "a", "title": "A", "brief": "a",
+        "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}],
+    }]}
+    with pytest.raises(ValueError, match="conflicting model configuration"):
+        run_campaign("/repo", plan, models={
+            "builders": ["a"], "reviewer": "reviewer", "best_of_n": 1,
+        }, best_of_n=2, profile=_profile(),
+                     item_executor=lambda *_args: ItemResult("a", "ready"))
+
+
+def test_run_campaign_honors_strict_inside_model_mapping():
+    plan = {"items": [{
+        "id": "a", "title": "A", "brief": "a",
+        "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}],
+    }]}
+    with pytest.raises(ValueError, match="requires at least 2"):
+        run_campaign("/repo", plan, models={
+            "builders": ["a"], "reviewer": "reviewer", "best_of_n": 2, "strict": True,
+        }, profile=_profile(), item_executor=lambda *_args: ItemResult("a", "ready"))
+
+
+def test_run_campaign_preserves_explicit_strict_when_mapping_omits_it():
+    plan = {"items": [{
+        "id": "a", "title": "A", "brief": "a",
+        "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}],
+    }]}
+    seen = {}
+
+    def execute(_item, roles, _prior):
+        seen["strict"] = roles.strict
+        return ItemResult("a", "ready")
+
+    run_campaign(
+        "/repo", plan,
+        models={"builders": ["a"], "reviewer": "reviewer", "best_of_n": 1},
+        strict=True, profile=_profile(), reviewer_fn=lambda _prompt: "review",
+        builder_dispatchers={"a": lambda _prompt: "build"}, item_executor=execute,
+    )
+    assert seen["strict"] is True
+
+
+def test_run_campaign_rejects_conflicting_strict_keyword():
+    plan = {"items": [{
+        "id": "a", "title": "A", "brief": "a",
+        "acceptance": [{"id": "A-1", "statement": "a", "oracle_path": "tests/test_a.py"}],
+    }]}
+    with pytest.raises(ValueError, match="conflicting model configuration"):
+        run_campaign("/repo", plan, models={
+            "builders": ["a"], "reviewer": "reviewer", "strict": True,
+        }, strict=False, profile=_profile(),
+                     item_executor=lambda *_args: ItemResult("a", "ready"))
+
+
+def test_role_models_does_not_coerce_false_strict_value():
+    with pytest.raises(TypeError, match="strict must be a boolean"):
+        RoleModels(("a",), "reviewer", strict="false")
+
+
 def test_run_campaign_allows_explicit_serial_override():
     seen = []
 

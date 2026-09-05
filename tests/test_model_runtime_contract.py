@@ -97,7 +97,7 @@ def test_campaign_builder_dispatcher_uses_preflight_credential_without_leaking_i
     assert result.items["transport"].status == "ready"
     assert seen["output"].startswith("--- a/x")
     dispatch_argv, dispatch_kwargs = calls[-1]
-    assert dispatch_argv[0] == "python3"
+    assert dispatch_argv[:3] == [sys.executable, "-m", "implement_skill.team_dispatch"]
     assert secret not in dispatch_argv
     assert secret not in dispatch_kwargs["input"]
     assert dispatch_kwargs["env"]["DEEPSEEK_API_KEY"] == secret
@@ -287,6 +287,15 @@ def test_host_callback_preflight_is_cheap_and_fail_closed():
         preflight_host_callbacks({"Reviewer": Unavailable()})
 
 
+def test_native_host_preflight_rejects_hook_only_bridge():
+    class HookOnly:
+        def preflight(self):
+            return True
+
+    with pytest.raises(RuntimeError, match="not callable"):
+        preflight_host_callbacks({"Builder:luna": HookOnly()}, require_bridge=True)
+
+
 def test_host_callback_envelope_rejects_wrong_identity_and_truncation():
     from preflight import wrap_host_callback
 
@@ -456,3 +465,103 @@ def test_campaign_rejects_raw_native_builder_before_item_executor():
             item_executor=item_executor,
         )
     assert events == []
+
+
+def _native_builder_plan():
+    return {"goal": "native fallback", "items": [{
+        "id": "native", "title": "Native", "brief": "x",
+        "acceptance": [{"id": "C1", "statement": "works", "oracle_path": "tests/test_x.py"}],
+    }]}
+
+
+class _UnavailableBridge:
+    def preflight(self):
+        return False
+
+    def __call__(self, _prompt):  # pragma: no cover - must never be invoked
+        raise AssertionError("unavailable bridge was dispatched")
+
+
+def test_campaign_drops_unavailable_native_builder_when_non_strict_and_fallback_is_live():
+    import campaign
+
+    profile = {
+        "pool": {
+            "luna": {"backend": "codex_mcp", "model": "gpt-5.6-luna"},
+            "fallback": {"backend": "claude_headless", "model": "claude-sonnet-4-6"},
+        },
+        "panels": {"architects": [], "builders": ["luna", "fallback"]},
+        "credentials": {}, "prefs": {},
+    }
+    seen = {}
+
+    def execute(_item, roles, _prior):
+        seen["builders"] = roles.builders
+        return campaign.ItemResult("native", "ready")
+
+    result = campaign.run_campaign(
+        "/missing-repo", _native_builder_plan(), builders=["luna", "fallback"],
+        reviewer="host", profile=profile, reviewer_fn=lambda _prompt: "legacy",
+        builder_dispatchers={"luna": _UnavailableBridge(), "fallback": lambda _p: "ok"},
+        item_executor=execute,
+    )
+    assert result.items["native"].status == "ready"
+    assert seen["builders"] == ("fallback",)
+
+
+def test_campaign_strict_rejects_unavailable_native_builder_before_item_executor():
+    import campaign
+
+    profile = {
+        "pool": {
+            "luna": {"backend": "codex_mcp", "model": "gpt-5.6-luna"},
+            "fallback": {"backend": "claude_headless", "model": "claude-sonnet-4-6"},
+        },
+        "panels": {"architects": [], "builders": ["luna", "fallback"]},
+        "credentials": {}, "prefs": {},
+    }
+    with pytest.raises(campaign.CampaignError, match="unavailable"):
+        campaign.run_campaign(
+            "/missing-repo", _native_builder_plan(), builders=["luna", "fallback"],
+            reviewer="host", profile=profile, reviewer_fn=lambda _prompt: "legacy",
+            builder_dispatchers={"luna": _UnavailableBridge(), "fallback": lambda _p: "ok"},
+            item_executor=lambda *_args: pytest.fail("item executor must not run"), strict=True,
+        )
+
+
+def test_run_implement_drops_unavailable_native_builder_before_dispatch(monkeypatch, tmp_path):
+    import implement
+    from execute import BestResult
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    profile = {
+        "pool": {
+            "luna": {"backend": "codex_mcp", "model": "gpt-5.6-luna"},
+            "fallback": {"backend": "claude_headless", "model": "claude-sonnet-4-6"},
+        },
+        "panels": {"architects": [], "builders": ["luna", "fallback"]},
+        "credentials": {}, "prefs": {},
+    }
+    seen = {}
+
+    monkeypatch.setattr(implement, "detect_adapter", lambda _repo: {"test_layout": "tests"})
+    monkeypatch.setattr(implement, "_acceptance_tests", lambda _repo, _adapter: ["tests/test_x.py"])
+    monkeypatch.setattr(
+        implement, "assess_suitability",
+        lambda **_kwargs: type("Suitability", (), {"autonomous_ok": True})(),
+    )
+    monkeypatch.setattr(implement, "available_backends", lambda runner=None: ["none"])
+
+    def fake_best(_repo, _brief, _adapter, dispatchers, **_kwargs):
+        seen["dispatchers"] = tuple(dispatchers)
+        return BestResult(winner="fallback", diff="", turns=0)
+
+    monkeypatch.setattr(implement, "run_best_of_n", fake_best)
+    result = implement.run_implement(
+        repo, "task", profile=profile,
+        dispatcher_overrides={"luna": _UnavailableBridge(), "fallback": lambda _p: "ok"},
+        trusted=True, ledger_path=str(tmp_path / "outcomes.jsonl"),
+    )
+    assert seen["dispatchers"] == ("fallback",)
+    assert result.unavailable == ("luna",)

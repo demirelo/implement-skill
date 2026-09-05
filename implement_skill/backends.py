@@ -3,13 +3,13 @@ so the v1 best-of-N loop consumes these unchanged. Two subprocess backends; code
 orchestrator-driven (M2)."""
 import json
 import subprocess
-from pathlib import Path
+import sys
 
 from .execute import _extract_diff, DispatchError
 from .resolvers import Cred, scoped_child_env
 from .scrub import scrub
 
-_DISPATCH = Path(__file__).parent / "team_dispatch.py"
+_DISPATCH_MODULE = "implement_skill.team_dispatch"
 
 
 class UnsupportedBackend(RuntimeError):
@@ -67,7 +67,7 @@ def make_dispatcher(entry: dict, effort: str = "low", max_tokens: int = 32000,
     if backend == "team_dispatch":
         # route selects the credential team_dispatch actually consumes: 'openrouter' (shared
         # key, default) vs 'direct' (per-provider; Venice e2ee for the private lane).
-        argv = ["python3", str(_DISPATCH), "--provider", entry["provider"],
+        argv = [sys.executable, "-m", _DISPATCH_MODULE, "--provider", entry["provider"],
                 "--route", entry.get("route", "openrouter"),
                 "--effort", dispatch_effort, "--max-tokens", str(max_tokens),
                 "--temperature", str(temperature)]
@@ -105,8 +105,11 @@ def probe_argv(entry: dict) -> list:
     """A cheap 1-token liveness probe command for a pool entry (caller runs it via resolvers.validate)."""
     backend = entry.get("backend")
     if backend == "team_dispatch":
-        return ["python3", str(_DISPATCH), "--provider", entry["provider"],
+        argv = [sys.executable, "-m", _DISPATCH_MODULE, "--provider", entry["provider"],
                 "--route", entry.get("route", "openrouter"), "--max-tokens", "32", "--effort", "none"]
+        if entry.get("model"):
+            argv += ["--model", entry["model"]]
+        return argv
     if backend == "claude_headless":
         argv = ["claude", "-p", "--model", entry["model"], "--output-format", "json"]
         dispatch_effort = _entry_effort(entry, "")

@@ -54,7 +54,7 @@ from .gh import (
 from .implement import run_implement
 from .backends import make_dispatcher
 from .profile import load_profile
-from .preflight import readiness, preflight_host_callbacks, wrap_host_callback
+from .preflight import readiness, preflight_host_callbacks, host_callback_status, wrap_host_callback
 from .publish import RunArtifacts, finalize, open_draft
 from .handoff import render_pr_body, render_review_comment, tier as handoff_tier
 from .review import build_final_review_prompt, parse_final_review
@@ -108,9 +108,19 @@ class RoleModels:
     strict: bool = False    # strict: demand exactly best_of_n available; default degrades to what's live
 
     def __post_init__(self):
-        unique = tuple(dict.fromkeys(str(x).strip() for x in self.builders if str(x).strip()))
+        if isinstance(self.builders, (str, bytes)) or not isinstance(self.builders, (tuple, list)):
+            raise TypeError("builders must be a list or tuple of non-empty strings")
+        if any(not isinstance(x, str) for x in self.builders):
+            raise TypeError("builders must be a list or tuple of non-empty strings")
+        if not isinstance(self.reviewer, str):
+            raise TypeError("reviewer must be a non-empty string")
+        if isinstance(self.best_of_n, bool) or not isinstance(self.best_of_n, int):
+            raise TypeError("best_of_n must be a positive integer")
+        if not isinstance(self.strict, bool):
+            raise TypeError("strict must be a boolean")
+        unique = tuple(dict.fromkeys(x.strip() for x in self.builders if x.strip()))
         object.__setattr__(self, "builders", unique)
-        object.__setattr__(self, "reviewer", str(self.reviewer).strip())
+        object.__setattr__(self, "reviewer", self.reviewer.strip())
         if not unique:
             raise ValueError("at least one Builder model is required")
         if not self.reviewer:
@@ -128,6 +138,40 @@ class RoleModels:
     @property
     def active_builders(self) -> tuple[str, ...]:
         return self.builders[:self.best_of_n]
+
+
+def _normalize_model_config(models, builders, reviewer, best_of_n, strict):
+    """Resolve the compact model mapping and its explicit keyword compatibility surface.
+
+    The mapping is intentionally a small, closed shape.  Accepting arbitrary keys or coercing
+    values here makes a typo look like a requested role and can silently turn a strict campaign
+    into a degrading one.  Explicit role keywords remain supported for existing callers, but a
+    role cannot be supplied in both forms.
+    """
+    if models is not None:
+        if not isinstance(models, Mapping):
+            raise TypeError("models must be a mapping with builders and reviewer")
+        allowed = {"builders", "reviewer", "best_of_n", "strict"}
+        unknown = set(models) - allowed
+        if unknown:
+            raise ValueError(f"unknown model config key(s): {sorted(unknown)}")
+        supplied = (
+            ("builders", builders), ("reviewer", reviewer),
+            ("best_of_n", best_of_n), ("strict", strict),
+        )
+        conflicts = [name for name, value in supplied if value is not None and name in models]
+        if conflicts:
+            raise ValueError(
+                "conflicting model configuration supplied in models and explicit keyword(s): "
+                + ", ".join(conflicts)
+            )
+        builders = models.get("builders", builders)
+        reviewer = models.get("reviewer", reviewer)
+        best_of_n = models.get("best_of_n", best_of_n)
+        strict = models.get("strict", strict)
+    return builders, reviewer, (2 if best_of_n is None else best_of_n), (
+        False if strict is None else strict
+    )
 
 
 @dataclass(frozen=True)
@@ -2729,7 +2773,7 @@ def _select_campaign_builders(roles, profile, overrides, *, reviewer_fn, env, ru
 def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_of_n=None, profile=None,
                  reviewer_fn=None, builder_dispatchers=None, item_executor=None,
                  runner=subprocess.run, env=None, trusted=False, parallel=True,
-                 strict=False, state_home=None, campaign_id=None, plan_id=None,
+                 strict=None, state_home=None, campaign_id=None, plan_id=None,
                  context_budget=DEFAULT_CONTEXT_BUDGET, limits=None, scheduler=None,
                  resource_budget=None, verification_backends=None) -> CampaignResult:
     """Run a Plan as dependency-aware parallel PR workstreams.
@@ -2746,14 +2790,6 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
     plan = CampaignPlan.from_value(plan)
     if not plan.items:
         raise CampaignError("Plan contains no implementation items")
-    # Validate host-owned model bridges before profile readiness probes, worktree creation, or any
-    # callback invocation.  Plain callable seams remain backwards compatible; bridge objects may
-    # provide a cheap preflight/is_available hook that fails closed here.
-    preflight_host_callbacks({
-        "Reviewer": reviewer_fn,
-        **{f"Builder:{name}": callback
-           for name, callback in (builder_dispatchers or {}).items()},
-    })
     _validate_ref(plan.base, "Plan base branch")
     without_acceptance = []
     for item in plan.items:
@@ -2768,17 +2804,11 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
         raise CampaignError(
             f"every Plan item needs observable acceptance criteria: {without_acceptance}"
         )
-    if models is not None:
-        if builders is not None or reviewer is not None:
-            raise ValueError("pass either models=... or builders=/reviewer=..., not both")
-        if not isinstance(models, dict):
-            raise TypeError("models must be a mapping with builders and reviewer")
-        builders = models.get("builders")
-        reviewer = models.get("reviewer")
-        if best_of_n is None:
-            best_of_n = models.get("best_of_n", 2)
-    width = 2 if best_of_n is None else int(best_of_n)
-    roles = RoleModels(tuple(builders or ()), str(reviewer or ""), width, strict=strict)
+    builders, reviewer, width, strict = _normalize_model_config(
+        models, builders, reviewer, best_of_n, strict,
+    )
+    roles = RoleModels(builders if builders is not None else (),
+                       reviewer if reviewer is not None else "", width, strict=strict)
     profile = profile or load_profile(start=Path(repo)) or default_profile(_MODELS, _PROVIDERS)
     if scheduler is not None and not isinstance(scheduler, Scheduler):
         raise TypeError("scheduler must be a Scheduler")
@@ -2799,54 +2829,72 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
         raise CampaignError(f"Builder model(s) not configured: {missing_builders}")
     if roles.reviewer not in pool and reviewer_fn is None:
         raise CampaignError(f"Reviewer model not configured: {roles.reviewer}")
-    missing_host_builders = [
-        model for model in roles.builders
-        if pool.get(model, {}).get("backend") == "codex_mcp" and model not in overrides
-    ]
-    if missing_host_builders:
-        raise CampaignError(
-            "native Codex Builder callback required before worktree creation: "
-            + ", ".join(missing_host_builders)
-        )
-    if (reviewer_fn is None and pool.get(roles.reviewer, {}).get("backend") == "codex_mcp"):
-        raise CampaignError(
-            "native Codex Reviewer callback required before worktree creation: "
-            + roles.reviewer
-        )
-    try:
-        native_callbacks = {
-            f"Builder:{model}": overrides[model]
-            for model in roles.builders
-            if pool.get(model, {}).get("backend") == "codex_mcp" and model in overrides
-        }
-        if (reviewer_fn is not None
-                and pool.get(roles.reviewer, {}).get("backend") == "codex_mcp"):
-            native_callbacks["Reviewer"] = reviewer_fn
-        preflight_host_callbacks(native_callbacks, require_bridge=True)
-        for model in roles.builders:
-            entry = pool.get(model, {})
-            if entry.get("backend") == "codex_mcp" and model in overrides:
-                wrap_host_callback(
-                    overrides[model], entry.get("model", model), role=f"Builder:{model}",
-                    require_envelope=True,
-                )
-        if reviewer_fn is not None and pool.get(roles.reviewer, {}).get("backend") == "codex_mcp":
-            entry = pool[roles.reviewer]
-            wrap_host_callback(
-                reviewer_fn, entry.get("model", roles.reviewer), role="Reviewer",
-                require_envelope=True,
+    # Validate ordinary callbacks up front, but let native Builder availability participate in
+    # the same reserve/degradation decision as credential-backed Builders.  Reviewer availability
+    # remains a hard pre-work requirement because every publication needs adversarial review.
+    preflight_host_callbacks({
+        "Reviewer": reviewer_fn
+        if pool.get(roles.reviewer, {}).get("backend") != "codex_mcp" else None,
+        **{f"Builder:{name}": callback
+           for name, callback in overrides.items()
+           if pool.get(name, {}).get("backend") != "codex_mcp"},
+    })
+    if pool.get(roles.reviewer, {}).get("backend") == "codex_mcp":
+        if reviewer_fn is None:
+            raise CampaignError(
+                "native Codex Reviewer callback required before worktree creation: "
+                + roles.reviewer
             )
-    except RuntimeError as exc:
-        raise CampaignError(str(exc)) from exc
-    degraded_builders: tuple = ()
+        available, detail = host_callback_status(
+            reviewer_fn, label="Reviewer", require_bridge=True,
+        )
+        if not available:
+            raise CampaignError(detail)
+
+    available_overrides = dict(overrides)
+    unavailable_native: list[tuple[str, str]] = []
+    for model in roles.builders:
+        if pool.get(model, {}).get("backend") != "codex_mcp":
+            continue
+        available, detail = host_callback_status(
+            available_overrides.get(model), label=f"Builder:{model}", require_bridge=True,
+        )
+        if not available:
+            unavailable_native.append((model, detail))
+            available_overrides.pop(model, None)
+    if unavailable_native:
+        unavailable_names = [model for model, _detail in unavailable_native]
+        if strict:
+            details = "; ".join(detail for _model, detail in unavailable_native)
+            raise CampaignError(
+                "strict: selected native Builder model(s) unavailable; no substitution performed: "
+                f"{unavailable_names} ({details})"
+            )
+        if len(unavailable_names) == len(roles.builders):
+            detail = unavailable_native[0][1]
+            if "callback is missing" in detail:
+                raise CampaignError(
+                    "native Codex Builder callback required before worktree creation: "
+                    + ", ".join(unavailable_names)
+                )
+            raise CampaignError(
+                "no configured Builder available for the campaign; all unavailable: "
+                f"{unavailable_names} ({detail})"
+            )
+        roles = replace(
+            roles, builders=tuple(model for model in roles.builders
+                                  if model not in unavailable_names),
+        )
+    degraded_builders: tuple = tuple(model for model, _detail in unavailable_native)
     credential_registry: dict[str, Cred] = {}
-    dispatchers = dict(overrides)
+    dispatchers = dict(available_overrides)
     if item_executor is None:
         # DEGRADE: substitute reserves for unavailable primaries (default), or fail on any
         # unavailable (strict). Dropped models flow to CampaignResult.degraded_builders → summary.
-        roles, degraded_builders = _select_campaign_builders(
-            roles, profile, overrides, reviewer_fn=reviewer_fn, env=env, runner=runner, strict=strict,
+        roles, dropped = _select_campaign_builders(
+            roles, profile, available_overrides, reviewer_fn=reviewer_fn, env=env, runner=runner, strict=strict,
             credential_registry=credential_registry)
+        degraded_builders = tuple(dict.fromkeys((*degraded_builders, *dropped)))
         prefs = profile.get("prefs", {})
         for model in roles.active_builders:
             if model in dispatchers:

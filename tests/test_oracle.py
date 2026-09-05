@@ -204,6 +204,26 @@ def test_structured_criteria_require_stable_ids_and_executable_oracles():
         }])
 
 
+def test_normalize_criterion_rejects_conflicting_oracle_path_forms():
+    from oracle import normalize_criterion
+
+    with pytest.raises(ValueError, match="conflicting oracle paths"):
+        normalize_criterion({
+            "id": "C1", "statement": "works",
+            "oracle_path": "tests/a.py", "oracle_paths": ["tests/b.py"],
+        })
+
+
+def test_normalize_criterion_rejects_non_string_oracle_command():
+    from oracle import normalize_criterion
+
+    with pytest.raises(ValueError, match="oracle_command"):
+        normalize_criterion({
+            "id": "C1", "statement": "works", "oracle_paths": ["tests/a.py"],
+            "oracle_command": ["pytest", "tests/a.py"],
+        })
+
+
 def test_criterion_evidence_without_context_is_conservative():
     criteria = (AcceptanceCriterion("C1", "works", ("tests/test_c1.py",), ""),
                 AcceptanceCriterion("C2", "also works", ("tests/test_c2.py",), ""))

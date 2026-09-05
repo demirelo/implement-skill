@@ -5,8 +5,8 @@ record_orchestrator_reply, unifying both paths into list[ArchCall]."""
 import json
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable
 
 from .execute import DispatchError
@@ -15,7 +15,7 @@ from .preflight import readiness
 from .resolvers import Cred, scoped_child_env
 from .scrub import scrub, env_secrets
 
-_DISPATCH = Path(__file__).parent / "team_dispatch.py"
+_DISPATCH_MODULE = "implement_skill.team_dispatch"
 
 
 class UnsupportedArchBackend(RuntimeError):
@@ -60,7 +60,7 @@ def make_arch_dispatcher(entry: dict, *, effort: str = "high", max_tokens: int =
     backend = entry.get("backend")
     dispatch_effort = _entry_effort(entry, effort)
     if backend == "team_dispatch":
-        argv = ["python3", str(_DISPATCH), "--provider", entry["provider"],
+        argv = [sys.executable, "-m", _DISPATCH_MODULE, "--provider", entry["provider"],
                 "--route", entry.get("route", "openrouter"),
                 "--effort", dispatch_effort, "--max-tokens", str(max_tokens),
                 "--temperature", str(temperature)]

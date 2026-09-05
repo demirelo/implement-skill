@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
 from gate import detect_adapter, run_gate
-from execute import run_inner_loop, _copy_repo, _repo_context
+from execute import run_inner_loop, _copy_repo, _repo_context, make_ow_dispatcher
 from oracle import AuthoredTest, check_red, protect_oracle
 from verification import VerificationContext
 
@@ -81,6 +81,24 @@ MULTIPLY_FIX_WITH_ARTIFACT = MULTIPLY_FIX + (
     "@@ -0,0 +1 @@\n"
     "+# Result\n"
 )
+
+
+def test_ow_dispatcher_uses_owning_interpreter_and_module_entrypoint():
+    calls = []
+
+    class Runner:
+        def __call__(self, argv, **kwargs):
+            calls.append((argv, kwargs))
+
+            class Proc:
+                returncode = 0
+                stdout = MULTIPLY_FIX
+                stderr = ""
+
+            return Proc()
+
+    make_ow_dispatcher("deepseek", runner=Runner())("prompt")
+    assert calls[0][0][:3] == [sys.executable, "-m", "implement_skill.team_dispatch"]
 
 
 def test_inner_loop_reaches_green_in_one_turn():

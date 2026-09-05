@@ -653,6 +653,12 @@ class _ResumeRunner:
         proc = Proc()
         if argv[:3] == ["gh", "pr", "view"]:
             proc.stdout = json.dumps({"comments": []})
+        elif argv[:3] == ["gh", "api", "graphql"]:
+            proc.stdout = json.dumps({
+                "data": {"repository": {"pullRequest": {"reviewThreads": {
+                    "nodes": [], "pageInfo": {"hasNextPage": False},
+                }}}}
+            })
         elif argv[:3] == ["gh", "pr", "comment"]:
             self.comments.append(kwargs.get("input") or kwargs.get("stdin") or "")
         return proc

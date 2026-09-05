@@ -32,7 +32,16 @@ def test_arch_dispatcher_returns_raw_text_not_diff():
     out = fn("judge this")
     assert out == "```diff\n--- a/x\n+++ b/x\n```\nprose after"   # NOT diff-extracted
     argv, stdin = fake.calls[0]
-    assert "team_dispatch.py" in argv[1] and "glm" in argv and stdin == "judge this"
+    assert argv[:3] == [sys.executable, "-m", "implement_skill.team_dispatch"]
+    assert "glm" in argv and stdin == "judge this"
+
+
+def test_arch_dispatcher_uses_owning_interpreter_and_module_entrypoint():
+    fake = FakeRun()
+    make_arch_dispatcher({"backend": "team_dispatch", "provider": "glm", "route": "direct"},
+                         runner=fake)("judge this")
+    argv, _ = fake.calls[0]
+    assert argv[:3] == [sys.executable, "-m", "implement_skill.team_dispatch"]
 
 
 def test_arch_dispatcher_uses_architect_defaults():
