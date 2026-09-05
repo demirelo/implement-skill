@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from .campaign import run_campaign
 from .campaign_state import load_state, state_path
+from .scrub import env_secrets, scrub
 
 
 DEMO_SCHEMA_VERSION = 1
@@ -532,6 +533,13 @@ def run_demo(
         result.branch = item.branch
         result.changed_files = tuple(item.changed_files)
         result.criterion_evidence = dict(item.criterion_evidence)
+        if item.status in {"failed", "blocked"}:
+            detail = scrub(str(item.error or "").strip(), env_secrets(environment))
+            detail = detail or "no item error was recorded"
+            raise DemoError(
+                f"campaign item {item.item_id} {item.status}: {detail}",
+                stage="campaign",
+            )
         result.lifecycle = {
             "draft_pr": bool(getattr(forge, "draft_pr_created", False)),
             "review": bool(getattr(demo_reviewer, "calls", 1)),

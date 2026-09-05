@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,6 +116,33 @@ def test_demo_failure_is_actionable_and_nonzero(monkeypatch, capsys):
     assert "Failed at prerequisite" in output
     assert "pytest" in output
     assert "Traceback" not in output
+
+
+def test_demo_surfaces_scrubbed_campaign_item_error(tmp_path, monkeypatch):
+    secret = "sk-" + ("a" * 24)
+    failed_item = SimpleNamespace(
+        item_id="calculator",
+        status="failed",
+        error=f"Builder failed while handling {secret}",
+        merged=False,
+        pr_url="",
+        branch="",
+        changed_files=(),
+        criterion_evidence={},
+    )
+    monkeypatch.setattr(
+        demo,
+        "run_campaign",
+        lambda *_args, **_kwargs: SimpleNamespace(items={"calculator": failed_item}),
+    )
+
+    result = demo.run_demo(tmp_path / "kept-demo")
+
+    assert result.ok is False
+    assert result.stage == "campaign"
+    assert "campaign item calculator failed" in result.error
+    assert secret not in result.error
+    assert "***" in result.error
 
 
 def test_module_smoke_compatibility_surface_remains_json():
