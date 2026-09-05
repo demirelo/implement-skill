@@ -16,6 +16,25 @@ CLI does not perform a second credential lookup. The native Codex Builder seed i
 (`gpt-5.6-luna`, `xhigh`) and the OpenRouter Reviewer seed is `muse`
 (`meta/muse-spark-1.3`).
 
+For this native pair, use the maintained package bridge and production example:
+
+```bash
+python3 -m implement_skill.setup --builder luna --reviewer muse --project /path/to/repo
+python3 examples/native_luna_campaign.py /path/to/repo \
+  --plan examples/plan.json \
+  --state-home /path/to/state-home \
+  --codex codex \
+  --autonomy ready
+```
+
+The default `codex` executable is resolved through `PATH`; if that resolves to an incompatible
+wrapper, pass the native executable path for the current host. The bridge invokes it with
+`--ignore-user-config --ephemeral --sandbox read-only`, the requested Luna model, and
+`model_reasoning_effort="xhigh"`; it validates the JSONL terminal event sequence and labels its
+identity as the host-configured request. The CLI event stream is not treated as an upstream
+returned-model attestation. Re-run the same command after interruption; the production campaign
+reconciles its durable state and external actions before retrying.
+
 ## Flow (agent-driven)
 1. **Probe free models.** Claude (this session) and Codex MCP need no key — confirm availability.
 2. **Per external provider, ask the user how they will pass the key** (one at a time):
@@ -26,8 +45,10 @@ CLI does not perform a second credential lookup. The native Codex Builder seed i
 3. **Validate** each with a real small terminal probe — `preflight.readiness(profile, probe=True)` runs
    `resolvers.validate(backends.probe_argv(entry))` and drops present-but-dead keys at setup, not mid-loop.
 4. **Compose the available model pool** with `panel.default_panels(available)` as a setup-time
-   fallback. A campaign's explicit `builders` and `reviewer` choices override these role defaults;
-   setup never substitutes for per-run role selection.
+   fallback. For a reproducible selected-role setup, pass `--builder` (repeatable) and
+   `--reviewer`; that route probes only those roles, does not ask the unrelated panel question,
+   and exits nonzero without saving if a requested role is not live. A campaign's explicit
+   `builders` and `reviewer` choices remain authoritative.
 5. **Store** with `profile.save_profile(cfg, scope=...)`. Ensure `.gitignore` covers `.implement/`
    and `.env`.
 
@@ -38,16 +59,20 @@ keeping provider API keys out of files and process arguments. Env credentials re
 interactive/local use.
 
 ## Programmatic wizard
-`python3 skills/implement/scripts/setup.py` runs the whole flow (all IO injectable — `input_fn`/`getpass_fn`/`runner`
-— so it is fully testable; raw secrets go through `getpass`, never echoed). It builds the credential
-SOURCE declarations, composes the panels, probes them, and saves the profile.
+`python3 -m implement_skill.setup` runs the whole flow (all IO injectable — `input_fn`/`getpass_fn`/`runner`
+— so it is fully testable; raw secrets go through `getpass`, never echoed). Add
+`--builder luna --reviewer muse` to select and probe only those roles. Add `--project /path/to/repo`
+to save a per-project override without replacing the global profile. It builds the credential SOURCE
+declarations, composes the panels, probes them, and saves the profile.
 
 ## Per run
 
 For a Plan campaign, call:
 
 ```python
-campaign.run_campaign(
+from implement_skill import run_campaign
+
+run_campaign(
     repo,
     plan,
     models={"builders": ["a", "b"], "reviewer": "r", "best_of_n": 2},

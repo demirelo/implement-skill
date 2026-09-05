@@ -42,7 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the deterministic offline calculator campaign demo",
         description=(
             "Create a tiny RED calculator project and drive it through the real campaign "
-            "lifecycle, without credentials, network, or GitHub mutations. "
+            "lifecycle with a simulated model/forge boundary, without credentials, network, "
+            "or GitHub mutations. "
             "Run this command as `implement-skill demo`."
         ),
     )
@@ -65,9 +66,9 @@ def _human_summary(summary: dict) -> str:
     if summary["ok"]:
         lines.extend([
             "  RED  calculator acceptance test failed as expected",
-            "  RUN  draft PR -> fresh review -> objective gate -> confirmed merge",
+            "  RUN  simulated forge draft PR -> fresh review -> objective gate -> simulated confirmed merge",
             "  GREEN calculator acceptance test passed",
-            f"  Merged {summary['campaign']['pr_url']}",
+            f"  Simulated forge merge confirmed {summary['campaign']['pr_url']}",
         ])
         if summary["cleanup"] in {"kept", "retained"}:
             lines.append(f"  Kept {summary['kept_path']}")
