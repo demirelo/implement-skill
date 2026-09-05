@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
@@ -279,6 +280,104 @@ def test_confirm_merge_requires_forge_state_timestamp_and_base_ancestry():
 def test_confirm_merge_without_forge_evidence_stays_queued():
     result = confirm_merge("/repo", 9, intended_base="base-sha", runner=FakeRun())
     assert result.confirmed is False and result.state == "queued"
+
+
+def test_confirm_merge_fetches_missing_merge_object_from_real_bare_remote(tmp_path):
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "repo"
+    producer = tmp_path / "producer"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    repo.mkdir()
+
+    def git(cwd, *args):
+        result = subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+        )
+        return result.stdout.strip()
+
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "impl@local")
+    git(repo, "config", "user.name", "impl")
+    (repo / "base.txt").write_text("base\n")
+    git(repo, "add", "base.txt")
+    git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base")
+    base_sha = git(repo, "rev-parse", "HEAD")
+    git(repo, "remote", "add", "origin", str(remote))
+    git(repo, "push", "-q", "-u", "origin", "main")
+    subprocess.run(
+        ["git", "clone", "-q", "--branch", "main", str(remote), str(producer)], check=True,
+    )
+    git(producer, "config", "user.email", "impl@local")
+    git(producer, "config", "user.name", "impl")
+    (producer / "merged.txt").write_text("merged\n")
+    git(producer, "add", "merged.txt")
+    git(producer, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "squash merge")
+    merge_sha = git(producer, "rev-parse", "HEAD")
+    git(producer, "push", "-q", "origin", "main")
+    assert subprocess.run(
+        ["git", "cat-file", "-e", f"{merge_sha}^{{commit}}"], cwd=repo,
+    ).returncode != 0
+
+    class Runner:
+        def __call__(self, argv, **kwargs):
+            if argv[:3] == ["gh", "pr", "view"]:
+                class Proc:
+                    returncode = 0
+                    stderr = ""
+                    stdout = json.dumps({
+                        "state": "MERGED",
+                        "mergedAt": "2026-09-05T08:57:08Z",
+                        "mergeCommit": {"oid": merge_sha},
+                    })
+
+                return Proc()
+            return subprocess.run(argv, **kwargs)
+
+    result = confirm_merge(
+        repo,
+        PrRef(1, "https://github.com/o/r/pull/1", "feature"),
+        intended_base=base_sha,
+        refresh=True,
+        runner=Runner(),
+    )
+    assert result.confirmed is True and result.state == "merged"
+
+
+def test_confirm_merge_refresh_failure_stays_unconfirmed():
+    class RefreshFailure:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, argv, **kwargs):
+            self.calls.append(argv)
+
+            class Proc:
+                returncode = 0
+                stderr = ""
+                stdout = ""
+
+            proc = Proc()
+            if argv[:3] == ["gh", "pr", "view"]:
+                proc.stdout = json.dumps({
+                    "state": "MERGED",
+                    "mergedAt": "2026-09-05T08:57:08Z",
+                    "mergeCommit": {"oid": "merge-sha"},
+                })
+            elif argv[:2] == ["git", "cat-file"]:
+                proc.returncode = 1
+            elif argv[:2] == ["git", "fetch"]:
+                proc.returncode = 1
+                proc.stderr = "network unavailable"
+            return proc
+
+    runner = RefreshFailure()
+    result = confirm_merge(
+        "/repo", PrRef(1, "https://github.com/o/r/pull/1", "feature"),
+        intended_base="base-sha", refresh=True, runner=runner,
+    )
+    assert result.confirmed is False
+    assert any(argv[:2] == ["git", "fetch"] for argv in runner.calls)
+    assert not any(argv[:2] == ["git", "merge-base"] for argv in runner.calls)
 
 
 def test_new_feedback_messages_deduplicates_by_id():

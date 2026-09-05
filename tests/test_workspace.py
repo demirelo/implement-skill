@@ -11,6 +11,7 @@ from workspace import (
     remove_merged_worktree,
     repo_context,
     WorkspaceError,
+    _worktree_rows,
 )
 from gh import MergeConfirmation
 
@@ -24,6 +25,23 @@ def _git_repo(tmp_path):
     sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false",
             "commit", "-q", "-m", "base"], cwd=repo, check=True)
     return repo
+
+
+def test_worktree_inventory_keeps_final_porcelain_stanza_without_trailing_blank():
+    output = (
+        "worktree /repo\n"
+        "HEAD base\n"
+        "branch refs/heads/main\n"
+        "\n"
+        "worktree /repo/.worktrees/pr-item\n"
+        "HEAD item\n"
+        "branch refs/heads/implement/item\n"
+    )
+
+    assert _worktree_rows(output) == [
+        {"path": "/repo", "head": "base", "branch": "main"},
+        {"path": "/repo/.worktrees/pr-item", "head": "item", "branch": "implement/item"},
+    ]
 
 
 def test_worktree_lifecycle_and_scoped_reset(tmp_path):
@@ -121,5 +139,29 @@ def test_cleanup_refuses_unconfirmed_merge(tmp_path):
     wt = create_branch_worktree(str(repo), "item-b", "implement/item-b", base="HEAD")
     with pytest.raises(WorkspaceError, match="forge merge confirmation"):
         remove_merged_worktree(str(repo), wt, "implement/item-b")
+    assert Path(wt).exists()
+    remove_worktree(str(repo), wt)
+
+
+def test_confirmed_cleanup_reports_residual_worktree(tmp_path):
+    repo = _git_repo(tmp_path)
+    wt = create_branch_worktree(str(repo), "item-c", "implement/item-c", base="HEAD")
+
+    class FailedRemoval:
+        def __call__(self, argv, **kwargs):
+            if argv[3:6] == ["worktree", "remove", "--force"]:
+                class Proc:
+                    returncode = 1
+                    stdout = ""
+                    stderr = "worktree is busy"
+
+                return Proc()
+            return sp.run(argv, **kwargs)
+
+    with pytest.raises(WorkspaceError, match="left path in place"):
+        remove_merged_worktree(
+            str(repo), wt, "implement/item-c", runner=FailedRemoval(),
+            confirmation=MergeConfirmation(True, {}),
+        )
     assert Path(wt).exists()
     remove_worktree(str(repo), wt)

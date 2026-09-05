@@ -22,8 +22,10 @@ It ships for two hosts: a [Claude Code plugin](#claude-code) and a native
 engine is under `implement_skill/`.
 
 > **Status: validation scope (v1.1.0).** The repository documents and tests the local offline
-> lifecycle, package boundaries, and configured host contracts. A real campaign still needs its
-> selected model, forge, and sandbox access; those external integrations are not claimed here.
+> lifecycle, package boundaries, and configured host contracts. One bounded native Luna/Muse/GitHub
+> campaign is recorded in the [live validation recipe](docs/live-validation.md); its local
+> post-merge cleanup and restart idempotence are confirmed. This does not claim every external
+> integration.
 
 ## First five minutes: install, then see a real local campaign
 
@@ -216,6 +218,9 @@ branch protection.
 ### Supported objective gates
 
 - Python repositories use `python3 -m pytest`; the standard adapter also runs Ruff and mypy.
+  Keep the pytest configuration in the repository checkout (for example,
+  `[tool.pytest.ini_options] testpaths = ["tests"]` in `pyproject.toml`) rather than relying on a
+  parent directory. Sandboxed candidate worktrees cannot read a parent checkout's configuration.
 - TypeScript repositories use Vitest.
 - Lean 4 repositories use Lake, including `lake build` and every declared acceptance module. The
   pinned toolchain and hydrated dependencies must exist before a sandboxed gate because gates have

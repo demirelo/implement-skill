@@ -1402,8 +1402,10 @@ def reconcile_campaign(repo, plan=None, *, state_store=None, home=None, runner=s
     The returned snapshot is a detached observation. It includes canonical state identity,
     local/remote branch and worktree inventories, matching PR identity and head revision, checks
     explicitly tied to that revision, queued-merge status, and forge-confirmed merge evidence. A
-    successful forge command is never interpreted as a merge. If ``state_store`` is supplied, the
-    complete snapshot is persisted as manager-owned reconciliation evidence after the read phase.
+    successful forge command is never interpreted as a merge. Confirming a forge merge may fetch
+    only the exact canonical base/merge objects needed for ancestry; it performs no forge, branch,
+    worktree, or working-tree mutation. If ``state_store`` is supplied, the complete snapshot is
+    persisted as manager-owned reconciliation evidence after the read phase.
     """
     if state_store is None:
         if not campaign_state.state_exists(repo, home=home):
@@ -1552,8 +1554,11 @@ def reconcile_campaign(repo, plan=None, *, state_store=None, home=None, runner=s
                         raise CampaignError(f"cannot read checks for PR #{pr_ref.number}: {exc}") from exc
             merge_state = str(status.get("state") or "").upper()
             if merge_state == "MERGED":
+                # Reconciliation may run before this checkout has fetched the forge's merge
+                # commit. Refresh only the exact immutable Plan base SHA and merge commit used for
+                # ancestry; the forge's baseRefName is a branch label, not equivalent evidence.
                 confirmed = confirm_merge(
-                    repo, pr_ref, intended_base=state["base_sha"], refresh=False, runner=runner,
+                    repo, pr_ref, intended_base=state["base_sha"], refresh=True, runner=runner,
                 )
             merge_state_status = str(status.get("mergeStateStatus") or "").upper()
             # BEHIND is a refresh requirement, not evidence that an auto-merge request crossed the
@@ -1693,6 +1698,40 @@ def _resumed_item_result(item, fact) -> ItemResult:
         merge_commit=str(fact.get("merge_commit") or ""),
         merged_at=str(fact.get("merged_at") or ""),
     )
+
+
+def _cleanup_resumed_merge(repo, result: ItemResult, fact: Mapping[str, Any], runner) -> ItemResult:
+    """Remove local merge artifacts after re-confirming the reconciled merge evidence.
+
+    The durable snapshot contains evidence from an earlier read boundary, not a reusable
+    ``MergeConfirmation`` object. Re-read the matching PR here so cleanup cannot manufacture a
+    confirmation from a stale forge status (or delete a branch after the PR has changed).
+    """
+    if result.status != "merged" or result.merged is not True:
+        return result
+    forge = fact.get("forge")
+    pr = _row_pr_ref(forge.get("pr")) if isinstance(forge, Mapping) else None
+    if pr is None:
+        # A second restart can observe that the local artifacts are already gone. Do not turn a
+        # missing PR identity into permission to delete an otherwise unknown branch.
+        if not result.worktree:
+            return result
+        raise CampaignError("reconciled merged item lacks PR identity for cleanup confirmation")
+    base_sha = str(fact.get("base_sha") or "").strip()
+    if not base_sha:
+        raise CampaignError("reconciled merged item lacks canonical base for cleanup confirmation")
+    confirmation = confirm_merge(
+        repo, pr, intended_base=base_sha, refresh=True, runner=runner,
+    )
+    if confirmation.confirmed is not True:
+        reason = confirmation.reason or "merge evidence is no longer confirmed"
+        raise CampaignError(f"refusing resumed merge cleanup: {reason}")
+    with _ROOT_GIT_LOCK:
+        remove_merged_worktree(
+            repo, result.worktree, result.branch, runner=runner, confirmation=confirmation,
+        )
+    result.worktree = ""
+    return result
 
 
 def _finding_labels(findings) -> list[str]:
@@ -2966,9 +3005,10 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
             # These boundaries are already owned by a reconciled PR. Never spend a fresh Builder
             # cohort on them; retain ready/queued as non-terminal so a later invocation rechecks
             # forge state and can observe a confirmed merge.
-            results[item.id] = _resume_finalization_boundary(
+            resumed = _resume_finalization_boundary(
                 repo, item, fact, state_store, runner,
             )
+            results[item.id] = _cleanup_resumed_merge(repo, resumed, fact, runner)
         pending = [item for item in pending if item.id not in results]
 
     while pending:

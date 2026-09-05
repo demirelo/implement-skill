@@ -108,12 +108,12 @@ def test_make_dispatcher_threads_route():
     assert argv2[argv2.index("--route") + 1] == "openrouter"   # default route explicit
 
 
-def test_probe_argv_team_dispatch_is_one_token():
+def test_probe_argv_team_dispatch_uses_bounded_response_budget():
     from backends import probe_argv
     argv = probe_argv({"backend": "team_dispatch", "provider": "deepseek", "route": "openrouter"})
     assert argv[:3] == [sys.executable, "-m", "implement_skill.team_dispatch"]
     assert "--provider" in argv and "deepseek" in argv
-    assert argv[argv.index("--max-tokens") + 1] == "32"
+    assert argv[argv.index("--max-tokens") + 1] == "512"
 
 
 def test_probe_argv_preserves_requested_team_dispatch_model():

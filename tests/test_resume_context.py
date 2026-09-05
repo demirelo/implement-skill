@@ -1,5 +1,6 @@
 import copy
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,8 +9,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
 
 from campaign import (
+    ItemResult,
     PlanItem,
     _bounded_item_context,
+    _cleanup_resumed_merge,
     _resume_finalization_boundary,
     _resume_pushed_branch,
     reconcile_campaign,
@@ -41,7 +44,7 @@ from gh import (
     open_draft_pr,
     post_comment,
 )
-from workspace import WorkspaceError, branch_inventory
+from workspace import WorkspaceError, branch_inventory, create_branch_worktree
 
 
 def _plan():
@@ -168,7 +171,8 @@ def test_reconcile_accepts_forge_confirmed_merge_and_persists_evidence(tmp_path)
         prs=[row],
         statuses={"7": {"state": "MERGED", "headRefOid": "head-sha", "isDraft": False,
                          "mergedAt": "2026-09-04T12:00:00Z",
-                         "mergeCommit": {"oid": "merge-sha"}}},
+                         "mergeCommit": {"oid": "merge-sha"},
+                         "mergeStateStatus": "UNKNOWN"}},
     )
     facts = reconcile_campaign(repo, state_store=store, home=home,
                                inventory=inventory, runner=runner, persist=True)
@@ -178,6 +182,173 @@ def test_reconcile_accepts_forge_confirmed_merge_and_persists_evidence(tmp_path)
     persisted = store.read()
     assert persisted["item_states"]["a"]["phase"] == "merged"
     assert persisted["reconciliation"]["canonical"]["revision"] == state["revision"]
+
+
+def test_reconcile_accepts_unknown_forge_merge_state_without_claiming_merge(tmp_path):
+    repo, home, store, state = _store(tmp_path)
+    row = {**_pr_row(state, draft=False), "state": "MERGED"}
+
+    class UnconfirmedRunner:
+        def __call__(self, argv, **kwargs):
+            class Proc:
+                returncode = 1
+                stdout = ""
+                stderr = "forge status unavailable"
+
+            return Proc()
+
+    facts = reconcile_campaign(
+        repo,
+        state_store=store,
+        home=home,
+        inventory=_inventory(
+            prs=[row],
+            statuses={"7": {
+                "state": "MERGED",
+                "headRefOid": "head-sha",
+                "isDraft": False,
+                "mergedAt": "2026-09-05T08:57:08Z",
+                "mergeCommit": {"oid": "merge-sha"},
+                "mergeStateStatus": "UNKNOWN",
+            }},
+        ),
+        runner=UnconfirmedRunner(),
+        persist=True,
+    )
+
+    assert facts["items"]["a"]["merge_state"] == "UNKNOWN"
+    assert facts["items"]["a"]["merged"] is False
+    assert store.read()["item_states"]["a"]["merge_state"] == "UNKNOWN"
+
+
+def test_reconcile_refreshes_missing_merge_objects_before_confirming_ancestry(tmp_path):
+    repo, home, store, state = _store(tmp_path)
+    row = {**_pr_row(state, draft=False), "state": "MERGED"}
+    calls = []
+
+    class RefreshingRunner:
+        def __call__(self, argv, **kwargs):
+            calls.append(argv)
+
+            class Proc:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            proc = Proc()
+            if argv[:3] == ["gh", "pr", "view"]:
+                proc.stdout = json.dumps({
+                    "state": "MERGED",
+                    "mergedAt": "2026-09-05T08:57:08Z",
+                    "mergeCommit": {"oid": "merge-sha"},
+                    "headRefOid": "head-sha",
+                    "baseRefName": "main",
+                    "mergeStateStatus": "UNKNOWN",
+                })
+            elif argv[:2] == ["git", "cat-file"]:
+                proc.returncode = 1
+            elif argv[:2] == ["git", "merge-base"]:
+                proc.returncode = 0
+            return proc
+
+    facts = reconcile_campaign(
+        repo,
+        state_store=store,
+        home=home,
+        inventory=_inventory(
+            prs=[row],
+            statuses={"7": {
+                "state": "MERGED",
+                "headRefOid": "head-sha",
+                "isDraft": False,
+                "mergeStateStatus": "UNKNOWN",
+            }},
+        ),
+        runner=RefreshingRunner(),
+        persist=True,
+    )
+
+    assert facts["items"]["a"]["phase"] == "merged"
+    assert facts["items"]["a"]["merged"] is True
+    fetches = [argv for argv in calls if argv[:2] == ["git", "fetch"]]
+    assert [argv[-1] for argv in fetches] == ["base-sha", "merge-sha"]
+    assert store.read()["item_states"]["a"]["phase"] == "merged"
+
+
+def test_confirmed_resume_cleanup_removes_worktree_and_is_idempotent(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "impl@local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "impl"], cwd=repo, check=True)
+    (repo / "tracked.txt").write_text("base\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"],
+        cwd=repo,
+        check=True,
+    )
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    worktree = create_branch_worktree(str(repo), "a", "implement/a-a", base="HEAD")
+    fact = {
+        "base_sha": base_sha,
+        "merge_state": "MERGED",
+        "merge_commit": base_sha,
+        "merged_at": "2026-09-05T08:57:08Z",
+        "forge": {
+            "pr": {
+                "number": 1,
+                "url": "https://github.com/o/r/pull/1",
+                "headRefName": "implement/a-a",
+                "headRefOid": base_sha,
+                "baseRefName": "main",
+                "title": "A",
+            },
+            "status": {
+                "state": "MERGED",
+                "mergedAt": "2026-09-05T08:57:08Z",
+                "mergeCommit": {"oid": base_sha},
+            },
+        },
+    }
+    result = ItemResult(
+        item_id="a", status="merged", branch="implement/a-a", worktree=worktree,
+        merged=True, merge_state="MERGED", merge_commit=base_sha,
+        merged_at="2026-09-05T08:57:08Z",
+    )
+
+    class Runner:
+        def __call__(self, argv, **kwargs):
+            if argv[:3] == ["gh", "pr", "view"]:
+                class Proc:
+                    returncode = 0
+                    stderr = ""
+                    stdout = json.dumps(fact["forge"]["status"])
+
+                return Proc()
+            return subprocess.run(argv, **kwargs)
+
+    runner = Runner()
+    cleaned = _cleanup_resumed_merge(str(repo), result, fact, runner)
+
+    assert cleaned.worktree == ""
+    assert cleaned.merged is True
+    assert cleaned.merge_commit == base_sha
+    assert not Path(worktree).exists()
+    assert subprocess.run(
+        ["git", "branch", "--list", "implement/a-a"], cwd=repo,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip() == ""
+    # A second process can observe the same durable merged evidence after cleanup. Missing local
+    # artifacts are already-clean, not a reason to recreate or block the merged item.
+    rerun = ItemResult(
+        item_id="a", status="merged", branch="implement/a-a", merged=True,
+        merge_state="MERGED", merge_commit=base_sha, merged_at=fact["merged_at"],
+    )
+    assert _cleanup_resumed_merge(str(repo), rerun, fact, runner).worktree == ""
 
 
 def test_reconcile_behind_pr_is_ready_for_refresh_not_terminal_queue(tmp_path):
