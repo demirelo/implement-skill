@@ -10,6 +10,9 @@ license = "MIT"
 readme = "README.md"
 description = "A green-gated, plan-driven software implementation campaign engine."
 
+[project.scripts]
+implement-skill = "implement_skill.cli:main"
+
 [project.optional-dependencies]
 # The single declared source for local/CI tooling. requirements-ci.txt is only the install entry
 # point (``-e .[dev]``); keep exact pins here rather than maintaining a second lock list.
