@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "implement" / "scripts"))
@@ -170,8 +171,14 @@ def test_pr_feedback_fetches_authoritative_graphql_review_threads():
             if argv[:3] == ["gh", "pr", "view"]:
                 P.stdout = '{"reviewDecision":"APPROVED","reviews":[],"comments":[]}'
             elif argv[:3] == ["gh", "api", "graphql"]:
-                P.stdout = '{"data":{"repository":{"pullRequest":{"reviewThreads":{' \
-                           '"nodes":[{"path":"src/a.py","isResolved":false}]}}}}}'
+                P.stdout = json.dumps({
+                    "data": {"repository": {"pullRequest": {"reviewThreads": {
+                        "nodes": [{"path": "src/a.py", "isResolved": False,
+                                   "comments": {"nodes": [],
+                                                "pageInfo": {"hasNextPage": False}}}],
+                        "pageInfo": {"hasNextPage": False},
+                    }}}}
+                })
             return P()
 
     fake = ThreadForge()
@@ -180,6 +187,75 @@ def test_pr_feedback_fetches_authoritative_graphql_review_threads():
     )
     assert data["reviewThreads"][0]["isResolved"] is False
     assert any(argv[:3] == ["gh", "api", "graphql"] for argv, _ in fake.calls)
+
+
+def test_pr_feedback_uses_valid_thread_comment_connection_and_preserves_ids():
+    class ThreadForge(FakeRun):
+        def __call__(self, argv, **kw):
+            self.calls.append((argv, kw.get("input")))
+
+            class P:
+                returncode = 0
+                stderr = ""
+                stdout = '{"reviewDecision":"APPROVED","reviews":[],"comments":[]}'
+
+            if argv[:3] == ["gh", "api", "graphql"]:
+                P.stdout = json.dumps({
+                    "data": {"repository": {"pullRequest": {"reviewThreads": {
+                        "nodes": [{"id": "thread-1", "isResolved": False,
+                                   "path": "src/a.py", "comments": {
+                                       "nodes": [{"id": "comment-1", "body": "fix this"}],
+                                       "pageInfo": {"hasNextPage": False},
+                                   }}],
+                        "pageInfo": {"hasNextPage": False},
+                    }}}}
+                })
+            return P()
+
+    fake = ThreadForge()
+    data = pr_feedback(
+        "/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"), runner=fake
+    )
+    query_argv = next(argv for argv, _input_text in fake.calls
+                      if argv[:3] == ["gh", "api", "graphql"])
+    query = next(token.removeprefix("-f=query=") for token in query_argv
+                 if token.startswith("-f=query="))
+    assert "comments(first:100){nodes{id body}" in query
+    assert "comments(first:100){nodes{id body} pageInfo{hasNextPage}}} pageInfo{hasNextPage}" in query
+    assert "nodes{isResolved path line originalLine body id}" not in query
+    assert query.count("{") == query.count("}")
+    assert data["comments"][-1] == {"id": "comment-1", "body": "fix this"}
+    messages, seen = new_feedback_messages(data)
+    assert any("fix this" in message for message in messages) and "comment-1" in seen
+
+
+def test_pr_feedback_marks_nested_comment_pagination_and_graphql_errors_unavailable():
+    class ThreadForge(FakeRun):
+        def __init__(self, output):
+            super().__init__()
+            self.output = output
+
+        def __call__(self, argv, **kw):
+            self.calls.append((argv, kw.get("input")))
+
+            class P:
+                returncode = 0
+                stderr = ""
+                stdout = '{"reviewDecision":"APPROVED","reviews":[],"comments":[]}'
+
+            if argv[:3] == ["gh", "api", "graphql"]:
+                P.stdout = self.output
+            return P()
+
+    paged = ('{"data":{"repository":{"pullRequest":{"reviewThreads":{'
+             '"nodes":[{"id":"t1","isResolved":true,"comments":{"nodes":[],'
+             '"pageInfo":{"hasNextPage":true}}}],"pageInfo":{"hasNextPage":false}}}}}}')
+    data = pr_feedback("/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"),
+                       runner=ThreadForge(paged))
+    assert data["_inline_feedback_incomplete"] is True
+    errors = pr_feedback("/repo", PrRef(9, "https://github.com/o/r/pull/9", "feat/x"),
+                         runner=ThreadForge('{"errors":[{"message":"bad field"}]}'))
+    assert errors["_inline_feedback_unavailable"] is True
 
 
 def test_confirm_merge_requires_forge_state_timestamp_and_base_ancestry():

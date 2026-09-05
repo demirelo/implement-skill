@@ -584,7 +584,8 @@ def pr_feedback(repo, pr, *, runner=subprocess.run) -> dict:
         query = (
             "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
             "pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved path "
-            "line originalLine body id} pageInfo{hasNextPage}}}}}"
+            "line originalLine id comments(first:100){nodes{id body} pageInfo{hasNextPage}}} "
+            "pageInfo{hasNextPage}}}}}"
         )
         try:
             thread_out = _run(
@@ -593,11 +594,51 @@ def pr_feedback(repo, pr, *, runner=subprocess.run) -> dict:
                 repo, runner,
             )
             graph = json.loads(thread_out or "{}")
-            threads = (((graph.get("data") or {}).get("repository") or {}).get("pullRequest") or
-                       {}).get("reviewThreads", {})
+            if not isinstance(graph, dict):
+                raise ForgeError("GraphQL review-thread query returned a non-object response")
+            if graph.get("errors"):
+                raise ForgeError("GraphQL review-thread query returned errors")
+            graph_data = graph.get("data")
+            repository = graph_data.get("repository") if isinstance(graph_data, dict) else None
+            pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
+            if not isinstance(pull_request, dict) or not isinstance(pull_request.get("reviewThreads"), dict):
+                raise ForgeError("GraphQL review-thread query returned no reviewThreads connection")
+            threads = pull_request["reviewThreads"]
+            thread_page_info = threads.get("pageInfo")
+            if (not isinstance(thread_page_info, dict)
+                    or not isinstance(thread_page_info.get("hasNextPage"), bool)):
+                raise ForgeError("GraphQL review-thread query returned malformed pagination")
             nodes = threads.get("nodes", []) if isinstance(threads, dict) else []
-            data["reviewThreads"] = nodes if isinstance(nodes, list) else []
-            if isinstance(threads, dict) and (threads.get("pageInfo") or {}).get("hasNextPage"):
+            if not isinstance(nodes, list):
+                raise ForgeError("GraphQL review-thread query returned malformed nodes")
+            data["reviewThreads"] = nodes
+            inline_comments = []
+            for node in nodes:
+                if not isinstance(node, dict):
+                    raise ForgeError("GraphQL review-thread query returned malformed thread")
+                comments = node.get("comments")
+                if not isinstance(comments, dict):
+                    raise ForgeError("GraphQL review-thread query returned no comments connection")
+                comment_page_info = comments.get("pageInfo")
+                if (not isinstance(comment_page_info, dict)
+                        or not isinstance(comment_page_info.get("hasNextPage"), bool)):
+                    raise ForgeError("GraphQL review-thread query returned malformed comment pagination")
+                comment_nodes = comments.get("nodes", [])
+                if not isinstance(comment_nodes, list):
+                    raise ForgeError("GraphQL review-thread query returned malformed comments")
+                if not all(isinstance(comment, dict) for comment in comment_nodes):
+                    raise ForgeError("GraphQL review-thread query returned malformed comment")
+                inline_comments.extend(comment_nodes)
+                if comment_page_info["hasNextPage"]:
+                    data["_inline_feedback_incomplete"] = True
+            if inline_comments:
+                existing_comments = data.get("comments", [])
+                if not isinstance(existing_comments, list):
+                    existing_comments = []
+                # Retain complete comment rows (especially IDs) so feedback deduplication remains
+                # stable when a thread comment is also visible through ``gh pr view``.
+                data["comments"] = [*existing_comments, *inline_comments]
+            if thread_page_info["hasNextPage"]:
                 data["_inline_feedback_incomplete"] = True
         except (ForgeError, json.JSONDecodeError):
             data["_inline_feedback_unavailable"] = True

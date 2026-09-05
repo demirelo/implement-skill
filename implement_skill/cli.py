@@ -69,18 +69,24 @@ def _human_summary(summary: dict) -> str:
             "  GREEN calculator acceptance test passed",
             f"  Merged {summary['campaign']['pr_url']}",
         ])
-        if summary["cleanup"] == "kept":
+        if summary["cleanup"] in {"kept", "retained"}:
             lines.append(f"  Kept {summary['kept_path']}")
         else:
             lines.append("  Cleaned the temporary project and campaign state")
         lines.append(f"Next: {summary['next_command']}")
     else:
         lines.append(f"  Failed at {summary['stage']}: {summary['error']}")
-        if summary["cleanup"] == "kept":
+        if summary["cleanup"] in {"kept", "retained"}:
             lines.append(f"  Kept {summary['kept_path']} for inspection")
         elif summary["cleanup"] == "cleaned":
             lines.append("  Cleaned the temporary project and campaign state")
-        lines.append("Next: install the named prerequisite or inspect the kept path, then retry")
+        elif summary["cleanup"] == "not-created":
+            lines.append("  No temporary project was created")
+        lines.append(
+            "Next: resolve the setup issue and retry"
+            if summary["cleanup"] == "not-created"
+            else "Next: install the named prerequisite or inspect the kept path, then retry"
+        )
     return "\n".join(lines)
 
 

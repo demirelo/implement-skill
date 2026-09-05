@@ -2,6 +2,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import os
 import json
@@ -511,7 +512,7 @@ def decision_trace(best: BestResult) -> dict:
             "candidates": candidates, "unavailable": list(best.unavailable)}
 
 
-_DISPATCH = Path(__file__).parent / "team_dispatch.py"
+_DISPATCH_MODULE = "implement_skill.team_dispatch"
 
 
 class DispatchError(RuntimeError):
@@ -528,7 +529,7 @@ def _extract_diff(text) -> str:
 def make_ow_dispatcher(provider, effort="medium", runner=subprocess.run):
     def fn(prompt):
         proc = runner(
-            ["python3", str(_DISPATCH), "--provider", provider,
+            [sys.executable, "-m", _DISPATCH_MODULE, "--provider", provider,
              "--effort", effort, "--max-tokens", "32000"],
             input=prompt, capture_output=True, text=True, timeout=650)
         if proc.returncode != 0 or not proc.stdout.strip():

@@ -6,7 +6,13 @@ from pathlib import Path
 
 from .gate import detect_adapter, oracle_paths
 from .execute import run_best_of_n
-from .preflight import readiness, enforce_privacy, preflight_host_callbacks, wrap_host_callback
+from .preflight import (
+    readiness,
+    enforce_privacy,
+    host_callback_status,
+    preflight_host_callbacks,
+    wrap_host_callback,
+)
 from .backends import make_dispatcher, PrivacyViolation, UnsupportedBackend
 from .profile import load_profile
 from .seed import default_profile
@@ -56,30 +62,49 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     if profile is None:
         profile = load_profile(start=start, home=home) or default_profile(_MODELS, _PROVIDERS)
     dispatcher_overrides = dispatcher_overrides or {}
-    # Host bridges must prove availability before adapter detection, gate setup, or any Builder
-    # callback can spend a model turn.  Plain callable overrides remain compatible; bridge objects
-    # can expose the cheap preflight hook validated here.
-    preflight_host_callbacks({f"Builder:{name}": callback
-                              for name, callback in dispatcher_overrides.items()})
+    if not isinstance(strict, bool):
+        raise TypeError("strict must be a boolean")
     selected_models = list(builders) if builders is not None else list(
         profile.get("panels", {}).get("builders", [])
     )
-    missing_host = [
-        model for model in selected_models
-        if profile.get("pool", {}).get(model, {}).get("backend") == "codex_mcp"
-        and model not in dispatcher_overrides
-    ]
-    if missing_host:
-        raise RuntimeError(
-            "native Codex Builder callback required before dispatch: " + ", ".join(missing_host)
+    pool = profile.get("pool", {})
+    # Ordinary callback seams remain backwards compatible.  Native Builder bridges are checked
+    # individually so a dead host session can be dropped while another configured Builder lives.
+    preflight_host_callbacks({
+        f"Builder:{name}": callback
+        for name, callback in dispatcher_overrides.items()
+        if pool.get(name, {}).get("backend") != "codex_mcp"
+    })
+    available_overrides = dict(dispatcher_overrides)
+    unavailable_native: list[tuple[str, str]] = []
+    for model in selected_models:
+        if pool.get(model, {}).get("backend") != "codex_mcp":
+            continue
+        available, detail = host_callback_status(
+            available_overrides.get(model), label=f"Builder:{model}", require_bridge=True,
         )
-    native_callbacks = {
-        f"Builder:{model}": dispatcher_overrides[model]
-        for model in selected_models
-        if profile.get("pool", {}).get(model, {}).get("backend") == "codex_mcp"
-        and model in dispatcher_overrides
-    }
-    preflight_host_callbacks(native_callbacks, require_bridge=True)
+        if not available:
+            unavailable_native.append((model, detail))
+            available_overrides.pop(model, None)
+    unavailable_names = [model for model, _detail in unavailable_native]
+    if unavailable_native and strict:
+        details = "; ".join(detail for _model, detail in unavailable_native)
+        raise RuntimeError(
+            "strict: selected native Builder model(s) unavailable; no substitution performed: "
+            f"{unavailable_names} ({details})"
+        )
+    if unavailable_native and len(unavailable_names) == len(selected_models):
+        detail = unavailable_native[0][1]
+        if "callback is missing" in detail:
+            raise RuntimeError(
+                "native Codex Builder callback required before dispatch: "
+                + ", ".join(unavailable_names)
+            )
+        raise RuntimeError(
+            "no configured Builder available before dispatch; all unavailable: "
+            f"{unavailable_names} ({detail})"
+        )
+    dispatcher_overrides = available_overrides
     if builders is not None:
         requested = list(dict.fromkeys(builders))
         if not requested:
@@ -120,11 +145,19 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     ledger_path = ledger_path or outcomes.default_path(home=home)
     bucket = features.bucket(task_brief, adapter)
     requested_builders = list(panels.get("builders", []))
-    live_builders = [m for m in requested_builders if live.get(m) or m in dispatcher_overrides]
-    unavailable_builders: list = []
+    live_builders = [
+        m for m in requested_builders
+        if m not in unavailable_names and (live.get(m) or m in dispatcher_overrides)
+    ]
+    unavailable_builders: list = list(unavailable_names)
     if builders is not None:
-        unavailable_builders = [m for m in requested_builders if m not in live_builders]
-        width = 2 if best_of_n is None else int(best_of_n)
+        unavailable_builders.extend(
+            m for m in requested_builders
+            if m not in live_builders and m not in unavailable_builders
+        )
+        width = 2 if best_of_n is None else best_of_n
+        if isinstance(width, bool) or not isinstance(width, int):
+            raise TypeError("best_of_n must be a positive integer")
         if width < 1:
             raise ValueError("best_of_n must be at least 1")
         if strict:
@@ -151,7 +184,9 @@ def run_implement(repo_path, task_brief, profile=None, start=None, home=None,
     elif len(live_builders) > 1:   # M5: rank defaults; explicit campaign roles preserve user order
         ranked = router.rank(bucket, live_builders, _load_priors(),
                              outcomes.tally(outcomes.load(ledger_path)), alias=_PRIOR_ALIAS)
-        top_k = max(int(best_of_n if best_of_n is not None else prefs.get("best_of_n", 2)), 1)
+        top_k = best_of_n if best_of_n is not None else prefs.get("best_of_n", 2)
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+            raise TypeError("best_of_n must be a positive integer")
         live_builders = [m for m, _ in ranked][:top_k]
 
     dispatchers = {}

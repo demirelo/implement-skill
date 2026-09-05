@@ -129,22 +129,54 @@ def normalize_criterion(raw, index: int = 0) -> AcceptanceCriterion:
         statement = str(raw.get("statement") or raw.get("text") or raw.get("description") or "").strip()
         nested_value = raw.get("oracle")
         nested: dict = nested_value if isinstance(nested_value, dict) else {}
-        paths = raw.get(
-            "oracle_paths",
-            raw.get("oracle_path", raw.get("path", nested.get("paths", nested.get("path", ())))),
-        )
-        if isinstance(paths, str):
-            paths = (paths,)
-        command = raw.get(
-            "oracle_command",
-            raw.get("command", nested.get("command", raw.get("oracle", ""))),
-        )
-        if not isinstance(command, str):
-            command = ""
+        path_forms = []
+        for key in ("oracle_paths", "oracle_path", "path"):
+            if key in raw:
+                path_forms.append((key, raw[key]))
+        for key in ("paths", "path"):
+            if key in nested:
+                path_forms.append((f"oracle.{key}", nested[key]))
+        normalized_forms = []
+        for key, value in path_forms:
+            if isinstance(value, str):
+                value = (value,)
+            elif isinstance(value, (list, tuple)) and all(isinstance(x, str) for x in value):
+                value = tuple(value)
+            else:
+                raise ValueError(f"acceptance criterion {cid or index + 1!r} {key} must be a string or string array")
+            normalized_forms.append((key, value))
+        paths = normalized_forms[0][1] if normalized_forms else ()
+        if any(value != paths for _key, value in normalized_forms[1:]):
+            labels = ", ".join(key for key, _value in normalized_forms)
+            raise ValueError(f"conflicting oracle paths in acceptance criterion {cid or index + 1!r}: {labels}")
+
+        command_forms = []
+        if "oracle_command" in raw:
+            command_forms.append(("oracle_command", raw["oracle_command"]))
+        if "command" in raw:
+            command_forms.append(("command", raw["command"]))
+        if "command" in nested:
+            command_forms.append(("oracle.command", nested["command"]))
+        if isinstance(nested_value, str):
+            command_forms.append(("oracle", nested_value))
+        for key, value in command_forms:
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"acceptance criterion {cid or index + 1!r} {key} must be a string"
+                )
+        command = command_forms[0][1].strip() if command_forms else ""
+        if any(value.strip() != command for _key, value in command_forms[1:]):
+            labels = ", ".join(key for key, _value in command_forms)
+            raise ValueError(
+                f"conflicting oracle commands in acceptance criterion {cid or index + 1!r}: {labels}"
+            )
         if not paths and raw.get("observable"):
-            command = str(raw["observable"])
-        criterion = AcceptanceCriterion(cid, statement, tuple(str(x) for x in (paths or ())),
-                                        str(command or "").strip())
+            if not isinstance(raw["observable"], str):
+                raise ValueError(
+                    f"acceptance criterion {cid or index + 1!r} observable must be a string"
+                )
+            command = raw["observable"].strip()
+        criterion = AcceptanceCriterion(cid, statement, tuple(paths), command)
     else:
         statement = str(raw).strip()
         # Prefer the stable ID prefix used in the implementation plan (e.g. ``VERIFY-1: ...``).

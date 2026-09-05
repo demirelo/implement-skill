@@ -142,6 +142,8 @@ def preflight_host_callbacks(callbacks: dict[str, object] | None = None,
         if require_bridge and not (hasattr(callback, "preflight")
                                    or hasattr(callback, "is_available")):
             raise RuntimeError(f"native host {label} callback needs a preflight hook")
+        if require_bridge and not callable(callback) and not callable(getattr(callback, "run", None)):
+            raise RuntimeError(f"native host {label} callback is not callable")
         if (not callable(callback) and not hasattr(callback, "preflight")
                 and not hasattr(callback, "is_available")):
             raise RuntimeError(f"host {label} callback is not callable")
@@ -156,6 +158,21 @@ def preflight_host_callbacks(callbacks: dict[str, object] | None = None,
             raise RuntimeError(f"host {label} callback preflight failed") from exc
         if result is False:
             raise RuntimeError(f"host {label} callback is unavailable")
+
+
+def host_callback_status(callback, *, label: str, require_bridge: bool = False) -> tuple[bool, str]:
+    """Return availability and a safe diagnostic for one host callback.
+
+    Campaign selection needs to treat an unavailable native Builder like an unavailable remote
+    model in non-strict mode, while Reviewer failures remain hard errors.  Keeping this adapter
+    beside ``preflight_host_callbacks`` ensures both paths use exactly the same structural and
+    readiness checks.
+    """
+    try:
+        preflight_host_callbacks({label: callback}, require_bridge=require_bridge)
+    except RuntimeError as exc:
+        return False, str(exc)
+    return True, ""
 
 
 def enforce_privacy(profile: dict) -> dict:
