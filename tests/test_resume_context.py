@@ -168,7 +168,8 @@ def test_reconcile_accepts_forge_confirmed_merge_and_persists_evidence(tmp_path)
         prs=[row],
         statuses={"7": {"state": "MERGED", "headRefOid": "head-sha", "isDraft": False,
                          "mergedAt": "2026-09-04T12:00:00Z",
-                         "mergeCommit": {"oid": "merge-sha"}}},
+                         "mergeCommit": {"oid": "merge-sha"},
+                         "mergeStateStatus": "UNKNOWN"}},
     )
     facts = reconcile_campaign(repo, state_store=store, home=home,
                                inventory=inventory, runner=runner, persist=True)
@@ -178,6 +179,43 @@ def test_reconcile_accepts_forge_confirmed_merge_and_persists_evidence(tmp_path)
     persisted = store.read()
     assert persisted["item_states"]["a"]["phase"] == "merged"
     assert persisted["reconciliation"]["canonical"]["revision"] == state["revision"]
+
+
+def test_reconcile_accepts_unknown_forge_merge_state_without_claiming_merge(tmp_path):
+    repo, home, store, state = _store(tmp_path)
+    row = {**_pr_row(state, draft=False), "state": "MERGED"}
+
+    class UnconfirmedRunner:
+        def __call__(self, argv, **kwargs):
+            class Proc:
+                returncode = 1
+                stdout = ""
+                stderr = "forge status unavailable"
+
+            return Proc()
+
+    facts = reconcile_campaign(
+        repo,
+        state_store=store,
+        home=home,
+        inventory=_inventory(
+            prs=[row],
+            statuses={"7": {
+                "state": "MERGED",
+                "headRefOid": "head-sha",
+                "isDraft": False,
+                "mergedAt": "2026-09-05T08:57:08Z",
+                "mergeCommit": {"oid": "merge-sha"},
+                "mergeStateStatus": "UNKNOWN",
+            }},
+        ),
+        runner=UnconfirmedRunner(),
+        persist=True,
+    )
+
+    assert facts["items"]["a"]["merge_state"] == "UNKNOWN"
+    assert facts["items"]["a"]["merged"] is False
+    assert store.read()["item_states"]["a"]["merge_state"] == "UNKNOWN"
 
 
 def test_reconcile_behind_pr_is_ready_for_refresh_not_terminal_queue(tmp_path):

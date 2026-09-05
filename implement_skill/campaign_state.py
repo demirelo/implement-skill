@@ -36,7 +36,7 @@ ITEM_PHASES = {
 }
 PR_STATES = {"", "OPEN", "CLOSED", "MERGED"}
 MERGE_STATES = {"", "MERGED", "QUEUED", "PENDING", "OPEN", "CLEAN", "BEHIND",
-                "DIRTY", "CONFLICTING", "BLOCKED"}
+                "DIRTY", "CONFLICTING", "BLOCKED", "UNKNOWN"}
 AMENDMENT_TYPES = {"local_deviation", "interface", "downstream", "goal", "scope"}
 ACTION_STATUSES = {"intent", "completed", "skipped", "failed"}
 PUBLICATION_CHECKPOINT_VERSION = 1
