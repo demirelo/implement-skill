@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from .campaign import run_campaign
 from .campaign_state import load_state, state_path
+from .runtime_env import prepend_interpreter_path
 from .scrub import env_secrets, scrub
 
 
@@ -71,6 +72,17 @@ class DemoResult:
     branch: str = ""
     changed_files: tuple[str, ...] = ()
     criterion_evidence: dict[str, bool | None] = field(default_factory=dict)
+    interpreter: dict[str, Any] = field(default_factory=dict)
+    canonical_state: dict[str, Any] = field(default_factory=lambda: {
+        "phase": "",
+        "merged": False,
+    })
+    forge_events: tuple[str, ...] = ()
+    forge_commands: tuple[tuple[str, ...], ...] = ()
+    worktree_path: str = ""
+    worktree_created: bool = False
+    worktree_observed_before_publication: bool = False
+    worktree_removed: bool = False
     lifecycle: dict[str, bool] = field(default_factory=lambda: {
         "draft_pr": False,
         "review": False,
@@ -109,6 +121,16 @@ class DemoResult:
                 "changed_files": list(self.changed_files),
                 "criterion_evidence": dict(self.criterion_evidence),
             },
+            "interpreter": dict(self.interpreter),
+            "canonical_state": dict(self.canonical_state),
+            "lifecycle_evidence": {
+                "forge_events": list(self.forge_events),
+                "forge_commands": [list(command) for command in self.forge_commands],
+                "worktree_path": self.worktree_path,
+                "worktree_created": self.worktree_created,
+                "worktree_observed_before_publication": self.worktree_observed_before_publication,
+                "worktree_removed": self.worktree_removed,
+            },
             "lifecycle": dict(self.lifecycle),
             "cleanup": self.cleanup,
             "next_command": (
@@ -128,10 +150,13 @@ class DemoForgeRunner:
     ancestry rather than trusting a boolean from the fake.
     """
 
-    def __init__(self, repo: Path) -> None:
+    def __init__(self, repo: Path, environment: dict[str, str] | None = None) -> None:
         self.repo = repo.resolve()
+        self.environment = dict(os.environ if environment is None else environment)
         self.calls: list[tuple[str, ...]] = []
+        self.gh_commands: list[tuple[str, ...]] = []
         self.events: list[str] = []
+        self.event_log: list[str] = []
         self.comments: list[str] = []
         self.pr: dict[str, Any] | None = None
         self.pushes = 0
@@ -139,13 +164,34 @@ class DemoForgeRunner:
         self.draft_pr_created = False
         self.merged = False
         self.merge_commit = ""
+        self.python3_calls = 0
+        self.python3_executable = self._resolve_python3(self.environment)
+        self.worktree_path = ""
+        self.worktree_created = False
+        self.worktree_observed_before_publication = False
+        self.worktree_removed = False
+
+    @staticmethod
+    def _resolve_python3(environment: dict[str, str]) -> str:
+        executable = shutil.which("python3", path=environment.get("PATH"))
+        return str(Path(executable).resolve()) if executable else ""
 
     def __call__(self, argv: list[str] | tuple[str, ...], *args: Any, **kwargs: Any) -> Any:
         command = tuple(str(token) for token in argv)
         self.calls.append(command)
         if command and command[0] == "gh":
+            self.gh_commands.append(command)
             return self._gh(command, kwargs)
-        result = subprocess.run(argv, *args, **kwargs)
+        if any(Path(token).name == "python3" for token in command):
+            self.python3_calls += 1
+            effective_environment = kwargs.get("env") or self.environment
+            resolved = self._resolve_python3(effective_environment)
+            if resolved:
+                self.python3_executable = resolved
+        options = dict(kwargs)
+        options["env"] = kwargs.get("env") or self.environment
+        result = subprocess.run(argv, *args, **options)
+        self._record_worktree_boundary(command, result)
         if command[:2] == ("git", "push") and result.returncode == 0:
             self.pushes += 1
             # The first push publishes the draft branch.  The second is the deterministic CI
@@ -158,13 +204,46 @@ class DemoForgeRunner:
         return result
 
     def _event_once(self, event: str) -> None:
+        self.event_log.append(event)
         if event not in self.events:
             self.events.append(event)
+
+    def _record_worktree_boundary(self, command: tuple[str, ...], result: Any) -> None:
+        if result.returncode != 0 or command[:1] != ("git",):
+            return
+        try:
+            worktree_index = command.index("worktree")
+            action = command[worktree_index + 1]
+        except (ValueError, IndexError):
+            return
+        if action == "add":
+            offset = worktree_index + 2
+            if offset < len(command) and command[offset] == "-b":
+                offset += 2
+            if offset >= len(command):
+                return
+            candidate = Path(command[offset])
+            probe = subprocess.run(
+                ["git", "-C", str(candidate), "rev-parse", "--git-dir"],
+                cwd=self.repo,
+                env=self.environment,
+                capture_output=True,
+                text=True,
+            )
+            git_dir = (probe.stdout or "").replace("\\", "/")
+            if probe.returncode == 0 and "worktrees" in git_dir.split("/"):
+                self.worktree_path = str(candidate.resolve())
+                self.worktree_created = True
+        elif action == "remove" and command:
+            candidate = Path(command[-1])
+            if self.worktree_path and candidate.resolve() == Path(self.worktree_path):
+                self.worktree_removed = not candidate.exists()
 
     def _git_sha(self, cwd: Path | None = None) -> str:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=cwd or self.repo,
+            env=self.environment,
             capture_output=True,
             text=True,
             check=True,
@@ -216,6 +295,9 @@ class DemoForgeRunner:
         if subcommand == ("pr", "create"):
             if self.pr is not None:
                 return Process("", 1, "offline forge already has a draft PR")
+            if not self.worktree_created:
+                return Process("", 1, "offline forge requires a linked worktree before publication")
+            self.worktree_observed_before_publication = True
             branch = self._value(command, "--head")
             base = self._value(command, "--base", "main")
             title = self._value(command, "--title", "")
@@ -278,6 +360,7 @@ class DemoForgeRunner:
         row = self._row()
         result = subprocess.run(
             ["git", "-C", str(self.repo), "merge", "--no-ff", "--no-edit", row["headRefName"]],
+            env=self.environment,
             capture_output=True,
             text=True,
         )
@@ -285,6 +368,7 @@ class DemoForgeRunner:
             return process_type("", result.returncode, result.stderr.strip()[:240])
         pushed = subprocess.run(
             ["git", "-C", str(self.repo), "push", "origin", "main"],
+            env=self.environment,
             capture_output=True,
             text=True,
         )
@@ -292,6 +376,7 @@ class DemoForgeRunner:
             return process_type("", pushed.returncode, pushed.stderr.strip()[:240])
         self.merge_commit = subprocess.run(
             ["git", "-C", str(self.repo), "rev-parse", "main"],
+            env=self.environment,
             capture_output=True,
             text=True,
             check=True,
@@ -328,15 +413,6 @@ class _DemoReviewer:
     def __call__(self, _prompt: str) -> str:
         self.calls += 1
         return '{"approved": true, "summary": "offline demo review passed", "findings": []}'
-
-
-def prepend_interpreter_path(environment: dict[str, str] | None = None) -> dict[str, str]:
-    """Return an environment whose child PATH resolves to this interpreter first."""
-    result = dict(os.environ if environment is None else environment)
-    interpreter_dir = str(Path(sys.executable).parent)
-    current = result.get("PATH", "")
-    result["PATH"] = interpreter_dir + (os.pathsep + current if current else "")
-    return result
 
 
 def _process(argv: list[str], cwd: Path, environment: dict[str, str]) -> Any:
@@ -467,6 +543,11 @@ def run_demo(
     state_home: Path | None = None
     result = DemoResult(
         kept_path=str(requested_keep) if requested_keep is not None else None,
+        interpreter={
+            "current": str(Path(sys.executable).resolve()),
+            "child_python3": "",
+            "python3_gate_calls": 0,
+        },
     )
     previous_tempdir = tempfile.tempdir
     try:
@@ -490,7 +571,10 @@ def run_demo(
                 "calculator acceptance test was expected to be RED but was not observed",
                 stage="red-check",
             )
-        forge = (runner_factory or DemoForgeRunner)(project)
+        forge = (
+            DemoForgeRunner(project, environment=environment)
+            if runner_factory is None else runner_factory(project)
+        )
         demo_builder = builder or _DemoBuilder()
         demo_reviewer = reviewer or _DemoReviewer()
         campaign_result = run_campaign(
@@ -533,6 +617,24 @@ def run_demo(
         result.branch = item.branch
         result.changed_files = tuple(item.changed_files)
         result.criterion_evidence = dict(item.criterion_evidence)
+        result.interpreter = {
+            "current": str(Path(sys.executable).resolve()),
+            "child_python3": str(getattr(forge, "python3_executable", "") or ""),
+            "python3_gate_calls": int(getattr(forge, "python3_calls", 0)),
+        }
+        result.forge_events = tuple(
+            str(event) for event in getattr(forge, "event_log", getattr(forge, "events", ()))
+        )
+        result.forge_commands = tuple(
+            tuple(str(token) for token in command)
+            for command in getattr(forge, "gh_commands", ())
+        )
+        result.worktree_path = str(getattr(forge, "worktree_path", "") or "")
+        result.worktree_created = bool(getattr(forge, "worktree_created", False))
+        result.worktree_observed_before_publication = bool(
+            getattr(forge, "worktree_observed_before_publication", False)
+        )
+        result.worktree_removed = bool(getattr(forge, "worktree_removed", False))
         if item.status in {"failed", "blocked"}:
             detail = scrub(str(item.error or "").strip(), env_secrets(environment))
             detail = detail or "no item error was recorded"
@@ -546,7 +648,12 @@ def run_demo(
             "objective_gate": bool(item.criterion_evidence)
             and all(value is True for value in item.criterion_evidence.values()),
             "merge_confirmation": bool(getattr(forge, "merged", False)) and item.merged,
-            "worktree_cleanup": not (project / ".worktrees" / "pr-calculator").exists(),
+            "worktree_cleanup": (
+                result.worktree_created
+                and result.worktree_observed_before_publication
+                and result.worktree_removed
+                and not (project / ".worktrees" / "pr-calculator").exists()
+            ),
         }
         if not all(result.lifecycle.values()):
             missing = ", ".join(key for key, value in result.lifecycle.items() if not value)
@@ -559,6 +666,10 @@ def run_demo(
         # also catches a result projection that claims merge while the durable state disagrees.
         state = load_state(project, state_home)
         state_item = state["item_states"]["calculator"]
+        result.canonical_state = {
+            "phase": str(state_item.get("phase") or ""),
+            "merged": state_item.get("merged") is True,
+        }
         if state_item.get("phase") != "merged" or state_item.get("merged") is not True:
             raise DemoError("canonical campaign state lacks confirmed merged evidence", stage="campaign")
         result.ok = True
@@ -567,12 +678,13 @@ def run_demo(
         return result
     except DemoError as exc:
         result.stage = exc.stage
-        result.error = str(exc)
+        result.error = scrub(str(exc), env_secrets(environment))
         result.cleanup = "kept" if kept else "cleaned"
         return result
     except Exception as exc:
         result.stage = "campaign" if project is not None and project.exists() else "setup"
-        result.error = str(exc)[:240] or type(exc).__name__
+        detail = str(exc)[:240] or type(exc).__name__
+        result.error = scrub(detail, env_secrets(environment))
         result.cleanup = "kept" if kept else "cleaned"
         return result
     finally:

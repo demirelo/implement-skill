@@ -17,9 +17,11 @@ implement-skill = "implement_skill.cli:main"
 # The single declared source for local/CI tooling. requirements-ci.txt is only the install entry
 # point (``-e .[dev]``); keep exact pins here rather than maintaining a second lock list.
 dev = [
+  "setuptools==80.9.0",
   "pytest==9.1.1",
   "ruff==0.15.22",
   "mypy==2.3.0",
+  "build==1.3.0",
 ]
 
 [tool.setuptools.packages.find]

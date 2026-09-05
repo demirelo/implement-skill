@@ -12,9 +12,9 @@ from pathlib import Path
 
 from .execute import decision_trace
 from . import implement as implement_module
-from .demo import prepend_interpreter_path
 from .implement import run_implement
 from .preflight import readiness
+from .runtime_env import prepend_interpreter_path
 from .profile import load_profile
 from .seed import default_profile
 from .setup import detect_env_credentials, profile_for_credentials
