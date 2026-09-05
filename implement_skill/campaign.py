@@ -2158,7 +2158,8 @@ def reconcile_stacked_child(repo, pr, *, base, worktree=None, verification_conte
 def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_dispatchers,
                            runner, env, trusted, prior, item, publication_barrier=None,
                            credential_registry=None, state_store=None,
-                           context_budget=DEFAULT_CONTEXT_BUDGET, wave_inventory=None) -> ItemResult:
+                           context_budget=DEFAULT_CONTEXT_BUDGET, wave_inventory=None,
+                           verification_backends=None) -> ItemResult:
     branch, worktree = _branch(item), ""
     verification_context = None
     try:
@@ -2194,7 +2195,9 @@ def _default_item_executor(repo, plan, roles, profile, reviewer_fn, builder_disp
             item_adapter,
             env or {},
             runner=runner,
-            available_backends=available_backends,
+            available_backends=(
+                available_backends if verification_backends is None else verification_backends
+            ),
             sandbox_image=item_adapter.get("docker_image"),
         )
         criteria = _criteria_for_item(item)
@@ -2728,13 +2731,14 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
                  runner=subprocess.run, env=None, trusted=False, parallel=True,
                  strict=False, state_home=None, campaign_id=None, plan_id=None,
                  context_budget=DEFAULT_CONTEXT_BUDGET, limits=None, scheduler=None,
-                 resource_budget=None) -> CampaignResult:
+                 resource_budget=None, verification_backends=None) -> CampaignResult:
     """Run a Plan as dependency-aware parallel PR workstreams.
 
     Users supply only the Plan and a model config:
     `{"builders": [...], "reviewer": "...", "best_of_n": 2}`.
     The width defaults to 2. The optional callback arguments are host/runtime seams for
-    orchestrator-only models and offline tests.
+    orchestrator-only models and offline tests. ``verification_backends`` is an optional explicit
+    backend allowlist for trusted, host-controlled runs; omitted means normal backend discovery.
     """
     if limits is not None and resource_budget is not None:
         raise ValueError("pass only one of limits= or resource_budget=")
@@ -2994,14 +2998,19 @@ def run_campaign(repo, plan, *, models=None, builders=None, reviewer=None, best_
             with scheduler.activate(), scheduler.item_slot():
                 if item_executor is not None:
                     return item_executor(item, roles, prior)
+                executor_options = {
+                    "publication_barrier": publication_barrier,
+                    "credential_registry": credential_registry,
+                    "state_store": state_store,
+                    "context_budget": context_budget,
+                    "wave_inventory": wave_inventory,
+                }
+                if verification_backends is not None:
+                    executor_options["verification_backends"] = verification_backends
                 return _default_item_executor(
                     repo, plan, roles, profile, reviewer_fn, dispatchers,
                     runner, env, trusted, prior, item,
-                    publication_barrier=publication_barrier,
-                    credential_registry=credential_registry,
-                    state_store=state_store,
-                    context_budget=context_budget,
-                    wave_inventory=wave_inventory,
+                    **executor_options,
                 )
 
         with ThreadPoolExecutor(

@@ -598,6 +598,7 @@ def run_demo(
             state_home=state_home,
             campaign_id="offline-demo-campaign",
             plan_id="offline-demo-plan",
+            verification_backends=["none"],
             resource_budget={
                 "items": 1,
                 "builders": 1,

@@ -213,8 +213,16 @@ def test_keep_requires_an_empty_explicit_target(tmp_path):
 
 def test_demo_prepends_running_interpreter_to_child_path(monkeypatch):
     monkeypatch.setattr(runtime_env.sys, "executable", "/isolated/bin/python")
-    result = runtime_env.prepend_interpreter_path({"PATH": "/usr/bin"})
+    supplied = {
+        "PATH": "/usr/bin",
+        "PYTHONDONTWRITEBYTECODE": "0",
+        "UNRELATED_CHILD_SETTING": "preserved",
+    }
+    result = runtime_env.prepend_interpreter_path(supplied)
     assert result["PATH"] == "/isolated/bin:/usr/bin"
+    assert result["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert result["UNRELATED_CHILD_SETTING"] == "preserved"
+    assert supplied["PYTHONDONTWRITEBYTECODE"] == "0"
 
 
 def test_demo_json_summary_has_stable_schema(monkeypatch, capsys):
