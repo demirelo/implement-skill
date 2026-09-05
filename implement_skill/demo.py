@@ -135,7 +135,7 @@ class DemoResult:
             "cleanup": self.cleanup,
             "next_command": (
                 "pytest -q {}/tests/test_calculator.py".format(self.project_path)
-                if self.kept_path
+                if self.kept_path and self.cleanup in {"kept", "retained"}
                 else "implement-skill demo --keep ./implement-skill-demo"
             ),
         }
@@ -708,5 +708,7 @@ def run_demo(
                         f"cleanup failed after removal: {cleanup_error}"
                     )
                     result.error = scrub(message, env_secrets(environment))
+        elif root is None:
+            result.cleanup = "not-created"
         elif kept:
             result.cleanup = "kept"

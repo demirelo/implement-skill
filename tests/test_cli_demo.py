@@ -200,15 +200,34 @@ def test_demo_default_cleans_project_and_state():
 
 
 def test_demo_reports_cleanup_failure_and_retains_ephemeral_path(monkeypatch):
-    monkeypatch.setattr(demo.shutil, "rmtree", lambda *_args, **_kwargs: None)
+    original_rmtree = demo.shutil.rmtree
+    result = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(demo.shutil, "rmtree", lambda *_args, **_kwargs: None)
+            result = demo.run_demo()
 
-    result = demo.run_demo()
+        assert result.ok is False
+        assert result.cleanup == "retained"
+        assert result.kept_path == result.project_path.removesuffix("/project")
+        assert Path(result.kept_path).exists()
+        assert "cleanup" in result.error.lower()
+    finally:
+        if result is not None and result.kept_path:
+            original_rmtree(result.kept_path, ignore_errors=True)
+
+
+def test_demo_setup_failure_reports_not_created(monkeypatch, tmp_path):
+    def fail(_keep):
+        raise demo.DemoError("keep path is unavailable", stage="setup")
+
+    monkeypatch.setattr(demo, "_root_for_keep", fail)
+    result = demo.run_demo(tmp_path / "not-created")
 
     assert result.ok is False
-    assert result.cleanup == "retained"
-    assert result.kept_path == result.project_path.removesuffix("/project")
-    assert Path(result.kept_path).exists()
-    assert "cleanup" in result.error.lower()
+    assert result.cleanup == "not-created"
+    assert result.kept_path == str((tmp_path / "not-created").resolve())
+    assert "--keep ./implement-skill-demo" in result.as_dict()["next_command"]
 
 
 def test_keep_requires_an_empty_explicit_target(tmp_path):

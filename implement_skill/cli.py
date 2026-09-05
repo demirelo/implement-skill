@@ -80,7 +80,13 @@ def _human_summary(summary: dict) -> str:
             lines.append(f"  Kept {summary['kept_path']} for inspection")
         elif summary["cleanup"] == "cleaned":
             lines.append("  Cleaned the temporary project and campaign state")
-        lines.append("Next: install the named prerequisite or inspect the kept path, then retry")
+        elif summary["cleanup"] == "not-created":
+            lines.append("  No temporary project was created")
+        lines.append(
+            "Next: resolve the setup issue and retry"
+            if summary["cleanup"] == "not-created"
+            else "Next: install the named prerequisite or inspect the kept path, then retry"
+        )
     return "\n".join(lines)
 
 
