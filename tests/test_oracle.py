@@ -267,7 +267,8 @@ def test_criterion_evidence_executes_declared_command(tmp_path):
         evidence = criterion_evidence((criterion,), verification_context=context, adapter=adapter)
     assert evidence == {"CMD-1": True}
     assert calls == [
-        ["pytest", "tests/test_command.py", "-q", "--tb=no", "-rf"],
+        ["python3", "-m", "pytest", "tests/test_command.py", "-q", "--tb=no", "-rf"],
+        # The criterion's explicitly declared command remains its authored bare pytest argv.
         ["pytest", "tests/test_command.py", "-q"],
     ]
 

@@ -2,7 +2,7 @@ name: CI
 
 # Runs the exact checks the README documents under "Testing":
 #   python3 -m pytest -q
-#   ruff check . && mypy skills/implement/scripts
+#   ruff check . && mypy implement_skill
 # Dependency preparation is explicit and pinned; gate commands never install dependencies.
 
 on:
@@ -35,7 +35,10 @@ jobs:
         run: ruff check .
 
       - name: Type-check (mypy)
-        run: mypy skills/implement/scripts
+        run: mypy implement_skill
+
+      - name: Validate checked-in Plan examples
+        run: python -c "from implement_skill.schema import validate_examples; validate_examples()"
 
       - name: Test (pytest)
         run: python -m pytest -q
@@ -64,13 +67,16 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install the pinned package/tooling source
+        run: python -m pip install --disable-pip-version-check -r requirements-ci.txt
+
       - name: Adapter gate conformance (TypeScript green)
         working-directory: tests/fixtures/sample_ts_repo
         run: |
-          PYTHONPATH=../../../skills/implement/scripts python - <<'PY'
+          python - <<'PY'
           from pathlib import Path
 
-          from gate import detect_adapter, run_gate
+          from implement_skill.gate import detect_adapter, run_gate
 
           repo = Path.cwd()
           result = run_gate(repo, detect_adapter(repo))
@@ -85,10 +91,10 @@ jobs:
       - name: Adapter gate conformance (TypeScript expected red)
         working-directory: tests/fixtures/sample_ts_repo
         run: |
-          PYTHONPATH=../../../skills/implement/scripts python - <<'PY'
+          python - <<'PY'
           from pathlib import Path
 
-          from gate import detect_adapter, run_gate
+          from implement_skill.gate import detect_adapter, run_gate
 
           repo = Path.cwd()
           adapter = dict(detect_adapter(repo))
@@ -120,13 +126,16 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install the pinned package/tooling source
+        run: python -m pip install --disable-pip-version-check -r requirements-ci.txt
+
       - name: Adapter gate conformance (Lean green)
         working-directory: tests/fixtures/sample_lean_repo
         run: |
-          PYTHONPATH=../../../skills/implement/scripts python - <<'PY'
+          python - <<'PY'
           from pathlib import Path
 
-          from gate import detect_adapter, run_gate
+          from implement_skill.gate import detect_adapter, run_gate
 
           repo = Path.cwd()
           result = run_gate(repo, detect_adapter(repo))
@@ -141,10 +150,10 @@ jobs:
       - name: Adapter gate conformance (Lean expected red)
         working-directory: tests/fixtures/sample_lean_repo
         run: |
-          PYTHONPATH=../../../skills/implement/scripts python - <<'PY'
+          python - <<'PY'
           from pathlib import Path
 
-          from gate import detect_adapter, run_gate
+          from implement_skill.gate import detect_adapter, run_gate
 
           repo = Path.cwd()
           adapter = dict(detect_adapter(repo))

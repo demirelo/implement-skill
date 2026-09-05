@@ -1,0 +1,19 @@
+{
+  "goal": "Add a calculator operation",
+  "base": "main",
+  "items": [
+    {
+      "id": "calculator-add",
+      "title": "Add calculator addition",
+      "brief": "Implement addition while preserving the public calculator API.",
+      "touched_areas": ["calculator.py", "tests/"],
+      "acceptance": [
+        {
+          "id": "addition-tests",
+          "statement": "The calculator test suite passes for positive and negative operands.",
+          "oracle_paths": ["tests/test_calculator.py"]
+        }
+      ]
+    }
+  ]
+}

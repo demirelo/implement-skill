@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/demirelo/implement-skill/schemas/plan.schema.json",
+  "title": "Implement campaign plan",
+  "type": "object",
+  "required": ["goal", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "goal": {"type": "string", "minLength": 1},
+    "base": {"type": "string", "minLength": 1},
+    "items": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/item"}}
+  },
+  "$defs": {
+    "criterion": {
+      "type": "object",
+      "required": ["id", "statement", "oracle_paths"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "statement": {"type": "string", "minLength": 1},
+        "oracle_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "oracle_command": {"type": "string", "minLength": 1}
+      }
+    },
+    "item": {
+      "type": "object",
+      "required": ["id", "title", "brief", "acceptance"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "brief": {"type": "string", "minLength": 1},
+        "deps": {"type": "array", "items": {"type": "string"}},
+        "touched_areas": {"type": "array", "items": {"type": "string"}},
+        "required_paths": {"type": "array", "items": {"type": "string"}},
+        "acceptance": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/criterion"}}
+      }
+    }
+  }
+}

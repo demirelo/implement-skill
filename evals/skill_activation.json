@@ -1,0 +1,7 @@
+[
+  {"id": "direct", "category": "direct", "prompt": "Use /implement to execute this Plan as isolated PRs.", "activate": true},
+  {"id": "indirect", "category": "indirect", "prompt": "Run the plan through competing Builders, objective tests, and draft PR repair.", "activate": true},
+  {"id": "incomplete", "category": "incomplete", "prompt": "Implement this feature autonomously.", "activate": false},
+  {"id": "negative", "category": "negative", "prompt": "Explain how a Python decorator works.", "activate": false},
+  {"id": "edge-case", "category": "edge-case", "prompt": "Review an existing implementation campaign without changing files.", "activate": false}
+]

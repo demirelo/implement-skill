@@ -1,19 +1,15 @@
-"""Suitability filter — only enter autonomous mode if an OBJECTIVE ORACLE exists. A gate adapter must
-be detected AND at least one acceptance test must exist; otherwise a 'green' is vacuous and the loop
-refuses to spend (stop-and-ask NO_ORACLE)."""
-from dataclasses import dataclass
+"""Compatibility shim; use the namespaced implement_skill package."""
+from importlib import import_module
+import runpy
+import sys
+from pathlib import Path
 
+_TARGET = "implement_skill.suitability"
+_ROOT = Path(__file__).resolve().parents[3]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-@dataclass(frozen=True)
-class Suitability:
-    autonomous_ok: bool
-    reasons: tuple = ()
-
-
-def assess(*, adapter, acceptance_tests) -> Suitability:
-    reasons = []
-    if not adapter:
-        reasons.append("no gate adapter detected (no objective oracle to make green)")
-    if not acceptance_tests:
-        reasons.append("no acceptance tests authored (a green would be vacuous)")
-    return Suitability(autonomous_ok=not reasons, reasons=tuple(reasons))
+if __name__ == "__main__":
+    runpy.run_module(_TARGET, run_name="__main__")
+else:
+    sys.modules[__name__] = import_module(_TARGET)

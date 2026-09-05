@@ -10,7 +10,9 @@ CI lifecycle, and PR. Failed CI and merge conflicts are routed back to the confi
 automatically.
 
 It ships for **two hosts**: a **[Claude Code](#getting-started-claude-code) plugin** and a
-**native [Codex](#getting-started-codex) skill** — the same `skills/implement/` folder drives both.
+**native [Codex](#getting-started-codex) skill**. Both invoke the same installable
+`implement_skill` package; the `skills/implement/` tree supplies the host metadata and temporary
+legacy shims.
 
 It is the software-engineering "door" of a general adversarial-loop engine (`/loop`). The principles:
 a swappable pool of models you own, explicit per-run role selection, a hard **test gate**
@@ -18,7 +20,7 @@ instead of model-judged verification, and green-gated PR automation. See
 [`docs/design.md`](docs/design.md) for the full design and [`docs/overview.html`](docs/overview.html)
 for a visual one-pager.
 
-> **Status: feature-complete (v1.0).** Every part was adversarially reviewed before landing —
+> **Status: feature-complete (v1.1.0).** Every part was adversarially reviewed before landing —
 > offline tests, ruff + mypy clean.
 
 ---
@@ -120,7 +122,8 @@ Real secret values are **never written to the repo**: the wizard stores only non
 configuration in `~/.config/implement/`:
 
 ```bash
-python3 skills/implement/scripts/setup.py     # walks you through it (from a clone of the repo)
+python3 -m pip install --disable-pip-version-check -r requirements-ci.txt
+python3 -m implement_skill.setup
 ```
 
 Simplest path: set **one** `OPENROUTER_API_KEY` env var — it fronts OpenRouter models in the
@@ -142,9 +145,10 @@ ln -s ~/implement-skill/skills/implement <your-codex-skills-dir>/implement
 Recommended Codex setup:
 
 ```bash
-python3 skills/implement/scripts/setup.py
-python3 skills/implement/scripts/smoke.py          # offline harness check
-python3 skills/implement/scripts/smoke.py --live   # optional: calls configured external Builders
+python3 -m pip install --disable-pip-version-check -e .[dev]
+python3 -m implement_skill.setup
+python3 -m implement_skill.smoke          # offline harness check
+python3 -m implement_skill.smoke --live   # optional: calls configured external Builders
 ```
 
 The setup wizard auto-detects these env var credentials and stores only their variable names, never
@@ -153,7 +157,8 @@ secret values: `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`/`MOONSHOT_A
 routes those Builders directly to their provider APIs so Codex runs do not fall into placeholder
 1Password/OpenRouter config.
 
-The configured model IDs above are installed seed IDs from `skills/implement/scripts/models.json`.
+The configured model IDs above are installed seed IDs from `implement_skill/models.json` (the
+legacy scripts path remains a compatibility symlink during the migration window).
 The Codex quickstart below uses native `luna` (`gpt-5.6-luna`, `xhigh`) as Builder and `muse`
 (`meta/muse-spark-1.3`) as the OpenRouter Reviewer. Script-dispatchable models use the same
 resolver for readiness and scoped child-process credentials.
@@ -162,8 +167,7 @@ resolver for readiness and scoped child-process credentials.
 
 ```bash
 python3 - <<'PY'
-import sys; sys.path.insert(0, "skills/implement/scripts")
-from campaign import run_campaign
+from implement_skill import run_campaign
 plan = {"goal": "ship the attached Plan", "items": [...]}  # normalized Plan items
 result = run_campaign(
     "/path/to/your/repo",
@@ -173,6 +177,10 @@ result = run_campaign(
 print(result.complete, result.total, result.progress)
 PY
 ```
+
+The production import is always the namespaced `implement_skill` package. The historical files in
+`skills/implement/scripts/` are thin compatibility shims for one migration window and may still be
+used as command-line entry points.
 
 For the native Codex Luna path, invoke `$implement` in Codex with `builders: [luna]`; the host
 supplies `builder_dispatchers={"luna": <host callback>}`. That callback must implement `preflight()`
@@ -188,12 +196,14 @@ A repo is **untrusted unless you pass `trusted=True`** — untrusted runs requir
 | `.claude-plugin/` | the plugin + marketplace manifests (so `/plugin install` works) |
 | `skills/implement/SKILL.md` | the skill front-matter + the loop the running Claude/Codex session executes |
 | `skills/implement/references/` | campaign scheduling/repair plus single-item phase and guardrail references |
-| `skills/implement/scripts/` | the engine — see below; `smoke.py` verifies the harness offline or live |
+| `implement_skill/` | the canonical installable engine package |
+| `skills/implement/scripts/` | one-window compatibility shims and CLI entry points |
 | `knowledge-base/` | `loop-techniques.md` (57 harvested techniques × 12 loop dimensions) + `model-priors.json`/`swe-benchmarks.md` (the router's seed) |
 | `docs/` | `design.md` (the spec) · `overview.html` (visual one-pager) |
 | `tests/` | offline unit tests (a fixture repo under `tests/fixtures/`) |
 
-The `skills/implement/scripts/` engine, by responsibility:
+The `implement_skill/` engine is organized by responsibility; legacy names under
+`skills/implement/scripts/` remain compatibility entry points:
 
 | Area | Scripts |
 |---|---|
@@ -209,7 +219,7 @@ The `skills/implement/scripts/` engine, by responsibility:
 
 ```bash
 python3 -m pytest -q          # offline tests (no network, no live models)
-ruff check . && mypy skills/implement/scripts
+ruff check . && mypy implement_skill
 ```
 
 The harness was dogfooded on its own construction, and every component passed a multi-lens adversarial
