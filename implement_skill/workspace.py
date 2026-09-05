@@ -33,6 +33,9 @@ def _worktree_rows(output: str) -> list[dict]:
             if current:
                 rows.append(current)
             current = {"path": line[9:].strip(), "head": "", "branch": ""}
+        elif current is not None and not line.strip():
+            rows.append(current)
+            current = None
         elif current is not None and line.startswith("HEAD "):
             current["head"] = line[5:].strip()
         elif current is not None and line.startswith("branch "):

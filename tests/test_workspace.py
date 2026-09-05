@@ -11,6 +11,7 @@ from workspace import (
     remove_merged_worktree,
     repo_context,
     WorkspaceError,
+    _worktree_rows,
 )
 from gh import MergeConfirmation
 
@@ -24,6 +25,23 @@ def _git_repo(tmp_path):
     sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false",
             "commit", "-q", "-m", "base"], cwd=repo, check=True)
     return repo
+
+
+def test_worktree_inventory_keeps_final_porcelain_stanza_without_trailing_blank():
+    output = (
+        "worktree /repo\n"
+        "HEAD base\n"
+        "branch refs/heads/main\n"
+        "\n"
+        "worktree /repo/.worktrees/pr-item\n"
+        "HEAD item\n"
+        "branch refs/heads/implement/item\n"
+    )
+
+    assert _worktree_rows(output) == [
+        {"path": "/repo", "head": "base", "branch": "main"},
+        {"path": "/repo/.worktrees/pr-item", "head": "item", "branch": "implement/item"},
+    ]
 
 
 def test_worktree_lifecycle_and_scoped_reset(tmp_path):
