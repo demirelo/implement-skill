@@ -221,7 +221,9 @@ def test_pr_feedback_uses_valid_thread_comment_connection_and_preserves_ids():
     query = next(token.removeprefix("-f=query=") for token in query_argv
                  if token.startswith("-f=query="))
     assert "comments(first:100){nodes{id body}" in query
+    assert "comments(first:100){nodes{id body} pageInfo{hasNextPage}}} pageInfo{hasNextPage}" in query
     assert "nodes{isResolved path line originalLine body id}" not in query
+    assert query.count("{") == query.count("}")
     assert data["comments"][-1] == {"id": "comment-1", "body": "fix this"}
     messages, seen = new_feedback_messages(data)
     assert any("fix this" in message for message in messages) and "comment-1" in seen

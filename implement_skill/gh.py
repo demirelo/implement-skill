@@ -584,7 +584,7 @@ def pr_feedback(repo, pr, *, runner=subprocess.run) -> dict:
         query = (
             "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
             "pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved path "
-            "line originalLine id comments(first:100){nodes{id body} pageInfo{hasNextPage}} "
+            "line originalLine id comments(first:100){nodes{id body} pageInfo{hasNextPage}}} "
             "pageInfo{hasNextPage}}}}}"
         )
         try:
