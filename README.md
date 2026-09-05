@@ -22,8 +22,9 @@ It ships for two hosts: a [Claude Code plugin](#claude-code) and a native
 engine is under `implement_skill/`.
 
 > **Status: validation scope (v1.1.0).** The repository documents and tests the local offline
-> lifecycle, package boundaries, and configured host contracts. A real campaign still needs its
-> selected model, forge, and sandbox access; those external integrations are not claimed here.
+> lifecycle, package boundaries, and configured host contracts. One bounded native Luna/Muse/GitHub
+> campaign is recorded in the [live validation recipe](docs/live-validation.md); its post-merge
+> cleanup still needs confirmation. This does not claim every external integration.
 
 ## First five minutes: install, then see a real local campaign
 
