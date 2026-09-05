@@ -92,6 +92,38 @@ def test_bridge_preflight_and_run_resolve_from_the_same_child_path(tmp_path, mon
     assert calls[1][1]["env"]["PATH"] == str(second)
 
 
+def test_bridge_scopes_child_environment_and_preserves_native_auth_home(tmp_path, monkeypatch):
+    executable = tmp_path / "codex"
+    executable.write_text("native executable placeholder")
+    executable.chmod(0o755)
+    auth_home = tmp_path / "codex-home"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-reviewer-secret")
+    calls = []
+    bridge = NativeCodexBridge(
+        env={
+            "PATH": str(tmp_path),
+            "CODEX_HOME": str(auth_home),
+            "OPENROUTER_API_KEY": "builder-should-not-receive-this",
+            "ARBITRARY_SECRET": "unrelated-secret",
+        },
+        runner=_runner(_events(
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "diff"}},
+            {"type": "turn.completed"},
+        ), calls),
+    )
+
+    assert bridge.preflight() is True
+    bridge.run("prompt")
+
+    for _, kwargs in calls:
+        child_env = kwargs["env"]
+        assert child_env["PATH"] == str(tmp_path)
+        assert child_env["CODEX_HOME"] == str(auth_home)
+        assert child_env["RUST_LOG"] == "error"
+        assert "OPENROUTER_API_KEY" not in child_env
+        assert "ARBITRARY_SECRET" not in child_env
+
+
 def test_bridge_relative_executable_with_separator_uses_declared_cwd(tmp_path):
     native = tmp_path / "bin" / "codex"
     native.parent.mkdir()

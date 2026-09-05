@@ -10,6 +10,11 @@ from .resolvers import Cred, scoped_child_env
 from .scrub import scrub
 
 _DISPATCH_MODULE = "implement_skill.team_dispatch"
+# A liveness probe must leave enough output budget for reasoning models to emit a complete
+# terminal response. Keep this bounded and shared by every team-dispatch provider; 32 tokens can
+# be consumed by reasoning alone (for example, Muse returned 125 reasoning tokens at a 128-token
+# cap during live setup).
+_PROBE_MAX_TOKENS = 512
 
 
 class UnsupportedBackend(RuntimeError):
@@ -102,11 +107,17 @@ def make_dispatcher(entry: dict, effort: str = "low", max_tokens: int = 32000,
 
 
 def probe_argv(entry: dict) -> list:
-    """A cheap 1-token liveness probe command for a pool entry (caller runs it via resolvers.validate)."""
+    """A bounded liveness probe command for a pool entry.
+
+    ``resolvers.validate`` supplies the minimal ``ping`` prompt. The response still needs a
+    complete structured terminal message, so the cap is deliberately larger than a literal one
+    token while remaining much smaller than a model dispatch.
+    """
     backend = entry.get("backend")
     if backend == "team_dispatch":
         argv = [sys.executable, "-m", _DISPATCH_MODULE, "--provider", entry["provider"],
-                "--route", entry.get("route", "openrouter"), "--max-tokens", "32", "--effort", "none"]
+                "--route", entry.get("route", "openrouter"),
+                "--max-tokens", str(_PROBE_MAX_TOKENS), "--effort", "none"]
         if entry.get("model"):
             argv += ["--model", entry["model"]]
         return argv

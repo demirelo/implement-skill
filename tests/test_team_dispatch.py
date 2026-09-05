@@ -31,6 +31,9 @@ def test_openrouter_request_threads_implement_headers(monkeypatch):
     team_dispatch.openrouter_request("model-x", [{"role": "user", "content": "p"}], 1, 0.1, "none", 3)
     assert captured["headers"]["X-Title"] == "implement"
     assert captured["body"]["model"] == "model-x"
+    # Mandatory-reasoning models reject an explicit effort=none. The bounded probe therefore
+    # preserves the provider default and relies on its max_tokens cap.
+    assert "reasoning" not in captured["body"]
 
 
 def test_overlay_profile_credentials_maps_op_refs(tmp_path):

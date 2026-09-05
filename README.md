@@ -216,6 +216,9 @@ branch protection.
 ### Supported objective gates
 
 - Python repositories use `python3 -m pytest`; the standard adapter also runs Ruff and mypy.
+  Keep the pytest configuration in the repository checkout (for example,
+  `[tool.pytest.ini_options] testpaths = ["tests"]` in `pyproject.toml`) rather than relying on a
+  parent directory. Sandboxed candidate worktrees cannot read a parent checkout's configuration.
 - TypeScript repositories use Vitest.
 - Lean 4 repositories use Lake, including `lake build` and every declared acceptance module. The
   pinned toolchain and hydrated dependencies must exist before a sandboxed gate because gates have

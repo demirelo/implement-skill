@@ -230,6 +230,9 @@ def openrouter_request(model, msgs, max_tokens, temperature, effort, timeout, ke
     url = oc["base_url"].rstrip("/") + "/chat/completions"
     body = {"model": model, "messages": msgs, "stream": False,
             "max_tokens": max_tokens, "temperature": temperature, "usage": {"include": True}}
+    # ``none`` is used by the bounded liveness probe. Leave the reasoning object out because
+    # providers with mandatory reasoning (such as Muse) reject an explicit ``effort: none``;
+    # max_tokens still bounds the provider's default reasoning plus response.
     if effort != "none":
         body["reasoning"] = {"effort": effort}
     key = resolve_key("openrouter", oc) if key is None else key

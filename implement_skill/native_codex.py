@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .resolvers import scoped_child_env
+
 DEFAULT_CODEX_EXECUTABLE = "codex"
 DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_REASONING_EFFORT = "xhigh"
@@ -128,7 +130,15 @@ class NativeCodexBridge:
 
     def _child_env(self) -> dict[str, str]:
         """Return the exact environment used for preflight and model execution."""
-        child_env = dict(os.environ) if self.env is None else dict(self.env)
+        source = dict(os.environ)
+        source.update(self.env or {})
+        # Native Codex authenticates through its local session home rather than an API key.  Keep
+        # this one non-secret path explicitly while using the shared credential allowlist for every
+        # other variable; in particular, never pass a reviewer's or arbitrary ambient API key to a
+        # local Builder process.
+        child_env = scoped_child_env(None, {}, source)
+        if source.get("CODEX_HOME"):
+            child_env["CODEX_HOME"] = str(source["CODEX_HOME"])
         # Keep CLI diagnostics out of the structured stdout stream while preserving the caller's
         # environment choices (notably CODEX_HOME for authentication).
         child_env["RUST_LOG"] = "error"

@@ -42,8 +42,12 @@ reconciles its durable state and external actions before retrying.
    app sessions: store the 1Password service-account token in Keychain service
    `op-service-account-token`, keep provider keys as `op://...` refs, and set
    `require_service_account: true`. Highlight **Venice = privacy lane** (e2ee) for confidential repos.
-3. **Validate** each with a real small terminal probe — `preflight.readiness(profile, probe=True)` runs
+3. **Validate** each with a real bounded terminal probe — `preflight.readiness(profile, probe=True)` runs
    `resolvers.validate(backends.probe_argv(entry))` and drops present-but-dead keys at setup, not mid-loop.
+   Team-dispatch probes use a fixed 512-token cap: this is still much smaller than a model turn,
+   but leaves reasoning models enough room to return a complete terminal response. Truncated or
+   empty responses remain unavailable; the probe never accepts a partial completion. The probe's
+   `none` effort leaves provider-required reasoning defaults intact; the cap bounds that response.
 4. **Compose the available model pool** with `panel.default_panels(available)` as a setup-time
    fallback. For a reproducible selected-role setup, pass `--builder` (repeatable) and
    `--reviewer`; that route probes only those roles, does not ask the unrelated panel question,
