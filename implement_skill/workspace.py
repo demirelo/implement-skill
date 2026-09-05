@@ -215,7 +215,8 @@ def remove_merged_worktree(repo, path, branch, runner=subprocess.run, *, confirm
     """
     if not isinstance(confirmation, MergeConfirmation) or confirmation.confirmed is not True:
         raise WorkspaceError("refusing cleanup before forge merge confirmation")
-    remove_worktree(repo, path, runner=runner)
+    if path:
+        remove_worktree(repo, path, runner=runner)
     # `gh pr merge --delete-branch` may already have removed the local branch. Cleanup is
     # idempotent after merge confirmation: absence is success, never a reason to resurrect/fail.
     runner(["git", "-C", str(repo), "branch", "-D", str(branch)],
