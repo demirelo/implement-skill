@@ -153,8 +153,9 @@ def test_protected_oracle_rejects_assert_true_tamper_before_execution(tmp_path):
     assert result.success is False
     assert "protected acceptance oracle" in result.ledger[0]
     assert len(runner.calls) == 3  # full test, lint, and type phases
-    assert runner.commands == [["pytest", "-q", "--tb=no", "-rf"],
-                               ["ruff", "check", "."], ["mypy", "."]]
+    assert runner.commands == [["python3", "-m", "pytest", "-q", "--tb=no", "-rf"],
+                               ["python3", "-m", "ruff", "check", "."],
+                               ["python3", "-m", "mypy", "."]]
     assert all(content == snapshot.files["tests/test_ops.py"] for content in runner.calls)
     context.close()
 
@@ -194,9 +195,11 @@ def test_protected_oracle_is_restored_before_scoped_and_full_gates(tmp_path):
     assert result.success is True
     assert len(runner.calls) == 7  # baseline full(3), scoped test(1), final full(3)
     assert runner.commands == [
-        ["pytest", "-q", "--tb=no", "-rf"], ["ruff", "check", "."], ["mypy", "."],
-        ["pytest", "tests/test_ops.py::test_multiply", "-q", "--tb=no", "-rf"],
-        ["pytest", "-q", "--tb=no", "-rf"], ["ruff", "check", "."], ["mypy", "."],
+        ["python3", "-m", "pytest", "-q", "--tb=no", "-rf"],
+        ["python3", "-m", "ruff", "check", "."], ["python3", "-m", "mypy", "."],
+        ["python3", "-m", "pytest", "tests/test_ops.py::test_multiply", "-q", "--tb=no", "-rf"],
+        ["python3", "-m", "pytest", "-q", "--tb=no", "-rf"],
+        ["python3", "-m", "ruff", "check", "."], ["python3", "-m", "mypy", "."],
     ]
     assert len(set(runner.calls)) == 1
     context.close()

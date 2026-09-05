@@ -1,0 +1,8 @@
+{
+  "name": "implement-skill",
+  "version": "1.1.0",
+  "python_package": "implement_skill",
+  "claude_plugin": "implement",
+  "legacy_shim_policy": "one migration window",
+  "canonical_architecture": "docs/design.md"
+}

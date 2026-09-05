@@ -1,3 +1,4 @@
+import os
 import tempfile
 import sys
 
@@ -256,3 +257,38 @@ def test_context_rejects_broad_home_and_shared_temp_runtime_roots(tmp_path, monk
             available=["none"],
             runtime_read_roots=(fake_shared_temp,),
         )
+
+
+def test_child_context_rechecks_same_size_source_edit_without_stale_bytecode(tmp_path):
+    repo = tmp_path / "repo"
+    tests = repo / "tests"
+    tests.mkdir(parents=True)
+    source = repo / "calculator.py"
+    source.write_text("def add(a, b):\n    return a - b\n")
+    original_mtime_ns = source.stat().st_mtime_ns
+    (tests / "test_calculator.py").write_text(
+        "import unittest\n\n"
+        "from calculator import add\n\n\n"
+        "class CalculatorTest(unittest.TestCase):\n"
+        "    def test_add_returns_sum(self):\n"
+        "        self.assertEqual(add(2, 3), 5)\n"
+    )
+    adapter = {"test_cmd": "python3 -m unittest discover -s tests -q"}
+    parent = verification.VerificationContext.create(
+        repo, trusted=True, adapter=adapter, available=["none"]
+    )
+    child = parent.child(repo, adapter)
+    try:
+        assert child.env["PYTHONDONTWRITEBYTECODE"] == "1"
+        assert child.run_gate().passed is False
+
+        # Keep the source size and timestamp token identical to exercise CPython's stale-pyc
+        # validation path. The operator's edit changes only the arithmetic operator.
+        source.write_text("def add(a, b):\n    return a + b\n")
+        os.utime(source, ns=(original_mtime_ns, original_mtime_ns))
+        result = child.run_gate()
+        assert result.passed is True, result.stdout
+        assert not (repo / "__pycache__").exists()
+    finally:
+        child.close()
+        parent.close()

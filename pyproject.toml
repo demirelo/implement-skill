@@ -1,8 +1,29 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "implement-skill"
-version = "1.0.0"
+version = "1.1.0"
 requires-python = ">=3.11"
 license = "MIT"
+readme = "README.md"
+description = "A green-gated, plan-driven software implementation campaign engine."
+
+[project.optional-dependencies]
+# The single declared source for local/CI tooling. requirements-ci.txt is only the install entry
+# point (``-e .[dev]``); keep exact pins here rather than maintaining a second lock list.
+dev = [
+  "pytest==9.1.1",
+  "ruff==0.15.22",
+  "mypy==2.3.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["implement_skill*"]
+
+[tool.setuptools.package-data]
+implement_skill = ["models.json", "providers.json", "adapters/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
