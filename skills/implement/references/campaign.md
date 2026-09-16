@@ -72,6 +72,8 @@ separate worktrees.
    For Lean, copy the root checkout's pre-hydrated `.lake` closure into the isolated worktree; never
    fetch dependencies from a Builder or inside the sandbox.
 4. Run `implement.run_implement(..., builders=..., best_of_n=N, force_turn=True)`.
+   Apply [builder-reliability.md](builder-reliability.md) when preparing assignments and evaluating
+   stage results. Stages remain one candidate/PR; they do not weaken the full publication gate.
 5. Require a non-vacuous full local gate and a behavior-test diff.
    A Lean full gate means `lake build` plus elaboration of every adapter-declared acceptance module,
    not merely a successful default Lake target.

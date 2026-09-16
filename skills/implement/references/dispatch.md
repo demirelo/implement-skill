@@ -18,6 +18,11 @@ the `execute` seam is renamed) and its successor `backends.make_dispatcher(entry
 returning a `fn(prompt) -> diff_text`. The loop core never calls the network directly — it takes a
 dispatch function, so it is fully testable with fakes.
 
+Before dispatching implementation work, read [builder-reliability.md](builder-reliability.md).
+A valid response envelope establishes transport completion, not a complete or correct patch.
+Use the backend's actual patch format; native tool-capable workers edit their isolated worktree,
+while stateless Builders receive sandbox execution results from the manager between stages.
+
 ## Continuity vs Independence
 
 Most external provider routes are stateless API calls. Do not pretend they preserve an interactive

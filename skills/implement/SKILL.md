@@ -44,6 +44,8 @@ not invent a per-run adapter.
    or conflicting areas. A dependent item waits for confirmed prerequisite merge.
 3. Give each item its own branch/worktree. Run Best-of-N Builders against the objective gate and
    select the smallest fully green candidate. Protect declared oracle files from Builder changes.
+   Before dispatch, read [Builder reliability](references/builder-reliability.md): stage broad
+   assignments, check artifact completeness, and close each stage with execution-backed feedback.
 4. Give the final diff and acceptance context to a fresh configured Reviewer, without Builder
    rationale or inherited transcript. Re-run the gate and fresh review after every repair.
 5. Open a draft PR only after local evidence is green. Repair bounded CI, review, and merge-conflict
@@ -88,6 +90,7 @@ does not represent a live provider or GitHub authentication check.
 - [Campaign, canonical state, and recovery](references/campaign.md)
 - [State and continuity boundary](references/state-and-continuity.md)
 - [Dispatch and response contract](references/dispatch.md)
+- [Staged Builder work, completeness checks, and bounded repairs](references/builder-reliability.md)
 - [Onboarding and selected-role setup](references/onboarding.md)
 - [Panel continuity and on-demand scouting](references/panel-continuity.md)
 - [Guardrails and acceptance oracles](references/guardrails.md)
