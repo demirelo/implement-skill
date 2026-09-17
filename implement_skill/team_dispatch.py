@@ -21,11 +21,13 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 import urllib.error
 import urllib.request
 
 from .scrub import env_secrets, scrub
 from .resolvers import resolve
+from .prompt_cache import cache_request_fields, cache_usage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG  = json.load(open(os.path.join(HERE, "providers.json")))
@@ -225,10 +227,15 @@ def post(url, body, headers, timeout):
     raise TransientHTTPError(last_transient or "failed after 3 attempts")
 
 
-def openrouter_request(model, msgs, max_tokens, temperature, effort, timeout, key=None):
+def openrouter_request(model, msgs, max_tokens, temperature, effort, timeout, key=None, *,
+                       session_id=None, stable_context=None, cache_mode="implicit", cache_ttl=None):
     oc = CFG["openrouter"]
     url = oc["base_url"].rstrip("/") + "/chat/completions"
-    body = {"model": model, "messages": msgs, "stream": False,
+    # Validate before credential lookup/network. Legacy opaque prompts remain untouched.
+    fields = cache_request_fields(model, msgs, session_id=session_id,
+                                  stable_context=stable_context, cache_mode=cache_mode,
+                                  cache_ttl=cache_ttl)
+    body = {"model": model, **fields, "stream": False,
             "max_tokens": max_tokens, "temperature": temperature, "usage": {"include": True}}
     # ``none`` is used by the bounded liveness probe. Leave the reasoning object out because
     # providers with mandatory reasoning (such as Muse) reject an explicit ``effort: none``;
@@ -238,7 +245,11 @@ def openrouter_request(model, msgs, max_tokens, temperature, effort, timeout, ke
     key = resolve_key("openrouter", oc) if key is None else key
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
                "HTTP-Referer": "https://localhost/implement", "X-Title": "implement"}
-    return post(url, body, headers, timeout)
+    data = post(url, body, headers, timeout)
+    if isinstance(data, dict):
+        print("team-dispatch-cache: " + _scrubbed(json.dumps(cache_usage(data)), [key]),
+              file=sys.stderr)
+    return data
 
 
 def direct_request(direct_key, model, msgs, max_tokens, temperature, timeout, key=None):
@@ -266,8 +277,28 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.3)
     ap.add_argument("--system", default=None)
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--session-id", help="Stable opaque model/workstream routing key; not a secret")
+    ap.add_argument("--stable-context-file", type=Path,
+                    help="Pinned reusable context placed before the dynamic stdin task")
+    ap.add_argument("--cache-mode", choices=["implicit", "anthropic"], default="implicit")
+    ap.add_argument("--cache-ttl", choices=["5m", "1h"],
+                    help="Explicit Anthropic prefix TTL only; longer TTL may cost more")
     a = ap.parse_args()
+    cache_requested = (a.session_id is not None or a.stable_context_file is not None
+                       or a.cache_mode != "implicit" or a.cache_ttl is not None)
+    if cache_requested and a.route != "openrouter":
+        ap.error("cache options apply only to the OpenRouter route; direct routes are unchanged")
     slug, direct_key, pin, pout = resolve_panel(a.provider, a.model, a.route)
+    stable_context = (a.stable_context_file.read_text(encoding="utf-8")
+                      if a.stable_context_file is not None else None)
+    cache_options = {}
+    if cache_requested:
+        cache_options = dict(session_id=a.session_id, stable_context=stable_context,
+                             cache_mode=a.cache_mode, cache_ttl=a.cache_ttl)
+        try:
+            cache_request_fields(a.model or slug, [], **cache_options)
+        except ValueError as exc:
+            ap.error(str(exc))
     credential_key = resolve_key(
         "openrouter" if a.route == "openrouter" else direct_key,
         CFG["openrouter"] if a.route == "openrouter" else CFG[direct_key],
@@ -276,14 +307,16 @@ def main():
     if not prompt.strip():
         sys.exit("team-dispatch: empty prompt on stdin")
 
-    msgs = ([{"role": "system", "content": a.system}] if a.system else []) + [
+    if stable_context is not None:
+        cache_options["stable_context"] = _scrubbed(stable_context)
+    msgs = ([{"role": "system", "content": _scrubbed(a.system)}] if a.system else []) + [
         {"role": "user", "content": prompt}
     ]
 
     if a.route == "openrouter":
         data = openrouter_request(
             a.model or slug, msgs, a.max_tokens, a.temperature, a.effort, a.timeout,
-            key=credential_key,
+            key=credential_key, **cache_options,
         )
     else:  # direct provider API
         try:
@@ -327,11 +360,14 @@ def main():
         sys.exit(f"team-dispatch: invalid provider response: {exc}")
     u = data.get("usage", {}) or {}
     ti, to = u.get("prompt_tokens"), u.get("completion_tokens")
-    if ti and to:
+    if ti is not None and to is not None:
         cost = ti/1e6*pin + to/1e6*pout
+        reported_cost = cache_usage(data)["reported_cost"]
+        cost_label = (f"reported_cost=${reported_cost:.5f}" if reported_cost is not None else
+                      f"uncached_list_estimate≈${cost:.5f}" if pin or pout else "cost=unknown")
         print(
             f"team-dispatch[{a.provider}/{a.route}]: in={ti} out={to} "
-            f"cost≈${cost:.5f}",
+            f"{cost_label}",
             file=sys.stderr,
         )
     print(txt)

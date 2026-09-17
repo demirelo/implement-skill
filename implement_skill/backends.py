@@ -78,6 +78,9 @@ def make_dispatcher(entry: dict, effort: str = "low", max_tokens: int = 32000,
                 "--temperature", str(temperature)]
         if entry.get("model"):  # a specific slug (e.g. a Venice e2ee model) overrides the route default
             argv += ["--model", entry["model"]]
+        for key in ("session_id", "stable_context_file", "cache_mode", "cache_ttl"):
+            if entry.get(key) is not None:
+                argv += ["--" + key.replace("_", "-"), str(entry[key])]
     elif backend == "claude_headless":
         argv = ["claude", "-p", "--model", entry["model"], "--output-format", "json"]
         if dispatch_effort == "max" or entry.get("effort"):

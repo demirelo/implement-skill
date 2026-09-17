@@ -37,6 +37,11 @@ The seed native role is Luna (`gpt-5.6-luna`, `xhigh`) and the external Reviewer
 `implement_skill` and the runnable `examples/native_luna_campaign.py` in the source checkout; do
 not invent a per-run adapter.
 
+For OpenRouter dispatches, read [prompt caching](references/openrouter-caching.md): separate
+stable item context from mutable feedback, reuse per-workstream routing keys, and record actual
+cache/cost evidence. Never change models, privacy, source freshness or review independence merely
+to improve cache hits. Existing opaque prompts are not automatically repacked.
+
 ## Execution decisions
 
 1. Normalize and validate the Plan and role configuration before model spend.

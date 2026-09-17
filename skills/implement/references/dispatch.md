@@ -20,6 +20,12 @@ dispatch function, so it is fully testable with fakes.
 
 ## Continuity vs Independence
 
+For OpenRouter, use the shared dispatcher's optional `stable_context`, `session_id`, `cache_mode`
+and `cache_ttl` controls instead of per-run request adapters. Read
+[openrouter-caching.md](openrouter-caching.md) for layout, endpoint limitations, CLI/pool entry
+wiring and measured accounting. Keep volatile state after the immutable prefix; no global prompt
+history or provider pinning is enabled automatically.
+
 Most external provider routes are stateless API calls. Do not pretend they preserve an interactive
 session unless the specific backend exposes durable conversation state. For related implementation
 work, maintain a local standing panel brief and per-provider review ledger, then send the current
