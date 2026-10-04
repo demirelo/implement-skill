@@ -49,8 +49,13 @@ to improve cache hits. Existing opaque prompts are not automatically repacked.
    or conflicting areas. A dependent item waits for confirmed prerequisite merge.
 3. Give each item its own branch/worktree. Run Best-of-N Builders against the objective gate and
    select the smallest fully green candidate. Protect declared oracle files from Builder changes.
+   Before dispatch, read [Builder reliability](references/builder-reliability.md): stage broad
+   assignments, check artifact completeness, and close each stage with execution-backed feedback.
 4. Give the final diff and acceptance context to a fresh configured Reviewer, without Builder
-   rationale or inherited transcript. Re-run the gate and fresh review after every repair.
+   rationale or inherited transcript. Before dispatch, read
+   [Reviewer reliability](references/reviewer-reliability.md) for packet completeness, context and
+   time budgets, terminal verdicts, and bounded recovery. Re-run the gate and fresh review after
+   every repair. A timeout or missing verdict is not a code rejection or approval.
 5. Open a draft PR only after local evidence is green. Repair bounded CI, review, and merge-conflict
    failures through the same Builder/Reviewer path. Never bypass branch protection.
 6. Mark `merged` only after forge state, merge timestamp/commit, and intended-base ancestry are
@@ -93,6 +98,8 @@ does not represent a live provider or GitHub authentication check.
 - [Campaign, canonical state, and recovery](references/campaign.md)
 - [State and continuity boundary](references/state-and-continuity.md)
 - [Dispatch and response contract](references/dispatch.md)
+- [Staged Builder work, completeness checks, and bounded repairs](references/builder-reliability.md)
+- [Reviewer packets, budgets, failure classification, and recovery](references/reviewer-reliability.md)
 - [Onboarding and selected-role setup](references/onboarding.md)
 - [Panel continuity and on-demand scouting](references/panel-continuity.md)
 - [Guardrails and acceptance oracles](references/guardrails.md)

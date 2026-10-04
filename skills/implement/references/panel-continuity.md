@@ -43,8 +43,10 @@ When asking a Builder to continue related implementation work, send:
 4. Output contract: patch, test plan, risk notes, and any GitHub comment text requested.
 
 Avoid resending the whole plan or full history unless the task genuinely requires it. When a model
-overruns or returns too little, retry with a smaller diff, narrower ask, or higher output budget if
-the user/runtime allows it.
+overruns or returns too little, first classify the failure and record the spent attempt. Recover
+with a smaller complete work unit or adjusted output budget only within the declared bounds and
+user/runtime authority; never silently retry or omit required scope. Independent Reviewer recovery
+follows [reviewer-reliability.md](reviewer-reliability.md), not Builder continuity.
 
 After each useful response, update the ledger with:
 - What the provider found or changed.

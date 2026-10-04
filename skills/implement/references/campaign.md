@@ -72,11 +72,15 @@ separate worktrees.
    For Lean, copy the root checkout's pre-hydrated `.lake` closure into the isolated worktree; never
    fetch dependencies from a Builder or inside the sandbox.
 4. Run `implement.run_implement(..., builders=..., best_of_n=N, force_turn=True)`.
+   Apply [builder-reliability.md](builder-reliability.md) when preparing assignments and evaluating
+   stage results. Stages remain one candidate/PR; they do not weaken the full publication gate.
 5. Require a non-vacuous full local gate and a behavior-test diff.
    A Lean full gate means `lake build` plus elaboration of every adapter-declared acceptance module,
    not merely a successful default Lake target.
 6. Run the configured Reviewer through `review.build_final_review_prompt` and
-   `review.parse_final_review`.
+   `review.parse_final_review`. Apply [reviewer-reliability.md](reviewer-reliability.md) before
+   dispatch and when recovering from context, timeout or response-format failures. No verdict
+   leaves the review gate incomplete; it does not create a Builder repair finding.
 7. Route objective blockers back through the same Best-of-N configuration; re-gate and re-review.
 8. Open the PR as a draft from the existing worktree branch.
 9. Stabilize CI and mergeability.
