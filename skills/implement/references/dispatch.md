@@ -18,6 +18,11 @@ the `execute` seam is renamed) and its successor `backends.make_dispatcher(entry
 returning a `fn(prompt) -> diff_text`. The loop core never calls the network directly — it takes a
 dispatch function, so it is fully testable with fakes.
 
+Before dispatching implementation work, read [builder-reliability.md](builder-reliability.md).
+A valid response envelope establishes transport completion, not a complete or correct patch.
+Use the backend's actual patch format; native tool-capable workers edit their isolated worktree,
+while stateless Builders receive sandbox execution results from the manager between stages.
+
 ## Continuity vs Independence
 
 For OpenRouter, use the shared dispatcher's optional `stable_context`, `session_id`, `cache_mode`
@@ -35,6 +40,11 @@ paying for the full project history.
 For PR review, prefer fresh stateless passes: independent reviewers should see the PR diff and
 acceptance context without being anchored by the Builder's prior rationale. Record useful review
 outcomes back into the ledger after the pass completes.
+
+Before an architecture or final review, read [reviewer-reliability.md](reviewer-reliability.md).
+Preflight the complete outbound packet and backend budgets; monitor the same live handle, and
+distinguish infrastructure failure from a terminal substantive verdict. These are manager workflow
+requirements, not a claim that every dispatcher implements packet sizing or automatic recovery.
 
 See `panel-continuity.md` for the exact prompt-packing and ledger rules.
 
