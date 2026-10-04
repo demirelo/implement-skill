@@ -520,10 +520,22 @@ class DispatchError(RuntimeError):
 
 
 def _extract_diff(text) -> str:
-    fence = re.search(r"```(?:diff|patch)?\n(.*?)```", text, re.DOTALL)
-    body = fence.group(1) if fence else text
-    start = body.find("--- ")
-    return body[start:] if start != -1 else body
+    """Prefer a single explicit patch without discarding Git metadata or alternatives."""
+    fences = re.findall(
+        r"^[ \t]*```([^\n`]*)\r?\n(.*?)^[ \t]*```[ \t]*\r?$",
+        text, re.MULTILINE | re.DOTALL,
+    )
+    candidates = [body for label, body in fences if label.strip().lower() in {"diff", "patch"}]
+    if not candidates:
+        candidates = [
+            body for label, body in fences
+            if not label.strip() and re.search(r"(?m)^--- [^\n]+\r?\n\+\+\+ ", body)
+        ]
+    if len(candidates) > 1:
+        raise DispatchError("ambiguous Builder output: multiple patch fences")
+    body = candidates[0] if candidates else text
+    start = re.search(r"(?m)^(?:diff --git |--- )", body)
+    return body[start.start():] if start else body
 
 
 def make_ow_dispatcher(provider, effort="medium", runner=subprocess.run):
